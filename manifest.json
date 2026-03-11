@@ -1,0 +1,9 @@
+{
+  "id": "checker",
+  "name": "Checker",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Automatically hides completed todo items",
+  "author": "TitanDrive",
+  "isDesktopOnly": false
+}
