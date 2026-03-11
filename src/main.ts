@@ -18,7 +18,7 @@ const DEFAULT_SETTINGS: CheckerSettings = {
   hiddenItems: {},
 };
 
-const DELAY_MS = 1000;
+const DELAY_MS = 500;
 const TASK_CHECKED = /^\s*- \[x\]/i;
 
 export default class CheckerPlugin extends Plugin {
@@ -46,11 +46,11 @@ export default class CheckerPlugin extends Plugin {
     if (activeFile) await this.snapshotFile(activeFile);
 
     this.registerEvent(
-      this.app.vault.on("modify", async (file: TFile) => {
-        if (file.extension !== "md") return;
+      this.app.workspace.on("editor-change", (editor, view) => {
+        if (!(view instanceof MarkdownView) || !view.file) return;
+        const file = view.file;
 
-        const content = await this.app.vault.read(file);
-        const lines = content.split("\n");
+        const lines = editor.getValue().split("\n");
         const oldChecked = this.knownChecked.get(file.path) || new Set();
         const newChecked = new Set<string>();
 
@@ -62,6 +62,16 @@ export default class CheckerPlugin extends Plugin {
           if (!oldChecked.has(line) && !this.pendingRemoval.has(`${file.path}:${line}`)) {
             const key = `${file.path}:${line}`;
             this.pendingRemoval.add(key);
+
+            // Capture prevLine now while we know exact position
+            const lineIdx = lines.indexOf(line);
+            const prevLine = lineIdx > 0 ? lines[lineIdx - 1] : null;
+
+            // Save immediately so it's never lost due to timing
+            if (this.settings.action === "hide") {
+              this.saveHiddenItem(file.path, line, prevLine);
+            }
+
             setTimeout(() => {
               this.pendingRemoval.delete(key);
               this.removeCheckedLine(file, line);
@@ -145,30 +155,23 @@ export default class CheckerPlugin extends Plugin {
   }
 
   private async removeCheckedLine(file: TFile, targetLine: string) {
+    // Try editor path first
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (view && view.file === file) {
+    if (view && view.file?.path === file.path) {
       const editor = view.editor;
       for (let i = 0; i < editor.lineCount(); i++) {
         if (editor.getLine(i) === targetLine) {
-          const prevLine = i > 0 ? editor.getLine(i - 1) : null;
-          if (this.settings.action === "hide") {
-            this.saveHiddenItem(file.path, targetLine, prevLine);
-          }
           this.deleteLine(editor, i, targetLine);
           return;
         }
       }
     }
 
+    // Fallback: vault API
     const content = await this.app.vault.read(file);
     const lines = content.split("\n");
     const idx = lines.indexOf(targetLine);
     if (idx === -1) return;
-
-    const prevLine = idx > 0 ? lines[idx - 1] : null;
-    if (this.settings.action === "hide") {
-      this.saveHiddenItem(file.path, targetLine, prevLine);
-    }
     lines.splice(idx, 1);
     await this.app.vault.modify(file, lines.join("\n"));
   }
