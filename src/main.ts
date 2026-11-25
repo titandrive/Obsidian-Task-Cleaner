@@ -208,7 +208,7 @@ export default class TaskCleanerPlugin extends Plugin {
 
   private schedule(file: TFile, checked: { text: string; line: number }[], text: string) {
     if (!checked.length) return;
-    if (this.settings.skipResetNotes && TASK_RESETTER_MARKER.test(text)) return;
+    if (this.settings.skipResetNotes && this.hasTaskResetter() && TASK_RESETTER_MARKER.test(text)) return;
     if (isIgnored(text)) return;
 
     for (const { text, line } of checked) {
@@ -410,6 +410,12 @@ export default class TaskCleanerPlugin extends Plugin {
 
   purgeNow() { return this.purgeOld(); }
 
+  /** Whether the Task Resetter plugin is installed (its notes only need leaving alone then). */
+  hasTaskResetter(): boolean {
+    // @ts-ignore: not in Obsidian's public API
+    return !!this.app.plugins?.manifests?.["task-resetter"];
+  }
+
   /** Notes that this note's hidden items changed now. */
   private touch(path: string) {
     this.settings.updated[path] = Date.now();
@@ -515,7 +521,7 @@ class TaskCleanerSettingTab extends PluginSettingTab {
         });
       });
 
-    new Setting(containerEl)
+    if (this.plugin.hasTaskResetter()) new Setting(containerEl)
       .setName("Leave Task Resetter notes alone")
       .setDesc("Don't hide or delete checked items in notes that have a Task Resetter button ([reset-tasks]).")
       .addToggle((toggle) =>

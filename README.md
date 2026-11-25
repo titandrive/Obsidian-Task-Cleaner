@@ -52,7 +52,7 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 - **Checked item behavior:** Hide (the default) or Delete.
 - **Delay:** how long a checked task stays before it's hidden or deleted. Right away, half a second (the default), 1, 2, 3, 5, 10 or 30 seconds.
 - **Purge hidden items:** how long hidden tasks are kept. 1 day, 1 week, 2 weeks, 30 days (the default), 90 days, 1 year, or never.
-- **Leave Task Resetter notes alone:** on by default.
+- **Leave Task Resetter notes alone:** on by default. Only shown, and only used, when Task Resetter is installed.
 
 ## QuickNote
 
