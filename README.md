@@ -29,6 +29,8 @@ While they're shown:
 
 In Task Cleaner's settings file (`.obsidian/plugins/task-cleaner/data.json`), listed by note, so nothing is added to your notes. Each one remembers the line it was under and the line number it was on, so it goes back to the right place even when a line is repeated. They follow a note when it's renamed, and are dropped when the note is deleted.
 
+If the settings file syncs between devices (Obsidian Sync with community plugin settings on, for example), so do hidden tasks. When one device's settings come in, Task Cleaner merges them note by note, keeping each note's list from whichever device changed it last, so hiding tasks on both doesn't lose either side's.
+
 Hidden tasks are deleted for good after a while (**Purge hidden items** in settings, 30 days by default). Tasks shown in a note at the time stay.
 
 ## Leaving a note alone

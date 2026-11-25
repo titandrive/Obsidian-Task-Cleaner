@@ -1,7 +1,7 @@
 {
   "id": "task-cleaner",
   "name": "Task Cleaner",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "minAppVersion": "1.0.0",
   "description": "Hides checked-off tasks a moment after you check them, and keeps them in the note to bring back.",
   "author": "TitanDrive",

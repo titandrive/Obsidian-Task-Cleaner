@@ -1,6 +1,6 @@
 import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, normalizePath, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
-import { CHECKED, Entry, IGNORE_KEY, Note, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { CHECKED, Entry, HiddenState, IGNORE_KEY, Note, mergeHidden, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
@@ -12,6 +12,8 @@ interface TaskCleanerSettings {
   purgeDays: number;
   /** Each note's hidden items, by the note's path. */
   hidden: Record<string, Entry[]>;
+  /** When each note's hidden items last changed, so two devices' settings can be merged. */
+  updated: Record<string, number>;
 }
 
 const DEFAULT_SETTINGS: TaskCleanerSettings = {
@@ -20,6 +22,7 @@ const DEFAULT_SETTINGS: TaskCleanerSettings = {
   delayMs: 500,
   purgeDays: 30,
   hidden: {},
+  updated: {},
 };
 
 /** The choices for how long hidden items are kept. */
@@ -75,7 +78,7 @@ export default class TaskCleanerPlugin extends Plugin {
       skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes,
       delayMs: typeof data.delayMs === "number" ? data.delayMs : DEFAULT_SETTINGS.delayMs,
       purgeDays: typeof data.purgeDays === "number" ? data.purgeDays : DEFAULT_SETTINGS.purgeDays,
-      hidden: data.hidden && typeof data.hidden === "object" && !Array.isArray(data.hidden) ? data.hidden : {},
+      ...readHidden(data),
     };
     this.addSettingTab(new TaskCleanerSettingTab(this.app, this));
 
@@ -141,6 +144,8 @@ export default class TaskCleanerPlugin extends Plugin {
         if (items) {
           delete this.settings.hidden[oldPath];
           this.settings.hidden[file.path] = items;
+          this.touch(oldPath);
+          this.touch(file.path);
           this.saveSettings();
         }
       }));
@@ -148,6 +153,7 @@ export default class TaskCleanerPlugin extends Plugin {
         this.seen.delete(file.path);
         if (this.settings.hidden[file.path]) {
           delete this.settings.hidden[file.path];
+          this.touch(file.path);
           this.saveSettings();
         }
       }));
@@ -259,6 +265,7 @@ export default class TaskCleanerPlugin extends Plugin {
       if (!changed) return null;
       if (note.entries.length) this.settings.hidden[file.path] = note.entries;
       else delete this.settings.hidden[file.path];
+      this.touch(file.path);
       return serialize({ ...note, entries: [] });
     });
     if (changed) await this.saveSettings();
@@ -343,6 +350,7 @@ export default class TaskCleanerPlugin extends Plugin {
     for (const [path, items] of Object.entries(old)) {
       if (!Array.isArray(items)) continue;
       const list = (this.settings.hidden[path] ??= []);
+      this.touch(path);
       for (const h of [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
         const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
         if (lines?.length) list.push({ kind: "hidden", after: h.prevLine ?? null, at: null, lines, hiddenAt: Date.now() });
@@ -376,6 +384,7 @@ export default class TaskCleanerPlugin extends Plugin {
     for (const { path: note, ...item } of items) {
       if (typeof note !== "string" || item.kind !== "hidden" || !Array.isArray(item.lines)) continue;
       (this.settings.hidden[note] ??= []).push(stamp(item as Entry));
+      this.touch(note);
     }
     await this.saveSettings();
     this.updateLabels();
@@ -385,17 +394,57 @@ export default class TaskCleanerPlugin extends Plugin {
   private async purgeOld() {
     let dropped = 0;
     for (const [path, entries] of Object.entries(this.settings.hidden)) {
-      dropped += purge(entries, this.settings.purgeDays);
+      const n = purge(entries, this.settings.purgeDays);
+      if (!n) continue;
+      dropped += n;
       if (!entries.length) delete this.settings.hidden[path];
+      this.touch(path);
+    }
+    // Times kept for notes with nothing hidden any more are only needed until both devices have
+    // synced; after 90 days they go.
+    for (const [path, at] of Object.entries(this.settings.updated)) {
+      if (!this.settings.hidden[path] && Date.now() - at > 90 * 86_400_000) { delete this.settings.updated[path]; dropped++; }
     }
     if (dropped) await this.saveSettings();
   }
 
   purgeNow() { return this.purgeOld(); }
 
+  /** Notes that this note's hidden items changed now. */
+  private touch(path: string) {
+    this.settings.updated[path] = Date.now();
+  }
+
+  /**
+   * Sync brought in the settings from another device: takes its settings, and merges the hidden
+   * items note by note (each note's from the device that changed it last), so neither device's
+   * changes are lost. If this device had newer ones, they're saved back for the other device.
+   */
+  async onExternalSettingsChange() {
+    const data = (await this.loadData()) ?? {};
+    const remote = readHidden(data);
+    const merged = mergeHidden({ hidden: this.settings.hidden, updated: this.settings.updated }, remote);
+    const changedHere = JSON.stringify(merged) !== JSON.stringify(remote);
+    this.settings = {
+      action: data.action ?? this.settings.action,
+      skipResetNotes: data.skipResetNotes ?? this.settings.skipResetNotes,
+      delayMs: typeof data.delayMs === "number" ? data.delayMs : this.settings.delayMs,
+      purgeDays: typeof data.purgeDays === "number" ? data.purgeDays : this.settings.purgeDays,
+      ...merged,
+    };
+    if (changedHere) await this.saveSettings();
+    this.updateLabels();
+  }
+
   async saveSettings() {
     await this.saveData(this.settings);
   }
+}
+
+/** The hidden items and their change times from saved settings (empty if missing or malformed). */
+function readHidden(data: Record<string, unknown>): HiddenState {
+  const obj = (v: unknown) => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, never>) : {});
+  return { hidden: obj(data.hidden), updated: obj(data.updated) };
 }
 
 /** An item with when it was hidden; ones from before that was kept count from now. */

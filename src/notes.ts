@@ -227,3 +227,28 @@ export function isIgnored(text: string): boolean {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   return !!m && new RegExp(`^(?:${IGNORE_KEY}|${OLD_IGNORE_KEY}):\\s*["']?(true|yes)["']?\\s*$`, "im").test(m[1]);
 }
+
+/** Hidden items by note, with when each note's list last changed (also for lists now gone). */
+export interface HiddenState {
+  hidden: Record<string, Entry[]>;
+  updated: Record<string, number>;
+}
+
+/**
+ * Two devices' hidden items, after sync brought in the other's: each note's list from whichever
+ * device changed it last. A note whose list was emptied or deleted keeps its time, so the other
+ * device's older list doesn't come back.
+ */
+export function mergeHidden(local: HiddenState, remote: HiddenState): HiddenState {
+  const out: HiddenState = { hidden: {}, updated: {} };
+  const paths = new Set([...Object.keys(local.hidden), ...Object.keys(local.updated), ...Object.keys(remote.hidden), ...Object.keys(remote.updated)]);
+  for (const path of paths) {
+    const lt = local.updated[path] ?? 0;
+    const rt = remote.updated[path] ?? 0;
+    const from = rt > lt ? remote : local;
+    const list = from.hidden[path];
+    if (list?.length) out.hidden[path] = list;
+    if (Math.max(lt, rt) > 0) out.updated[path] = Math.max(lt, rt);
+  }
+  return out;
+}
