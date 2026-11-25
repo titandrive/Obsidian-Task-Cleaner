@@ -1,45 +1,42 @@
 import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
+import { hideBlockInLivePreview } from "./hide-block";
+import { BLOCK_START, CHECKED, Entry, blockEnd, isChecked, newlyChecked, parse, replaceLines, serialize, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
-
-/** A checked task taken out of a note: the task line and the lines nested under it. */
-interface HiddenItem {
-  lines: string[];
-  prevLine: string | null; // the line just above it when it was taken out, to put it back there
-  seq: number;             // order taken out, to put items back in the right order
-}
 
 interface CheckerSettings {
   action: CheckedAction;
   skipResetNotes: boolean;
-  hiddenItems: Record<string, HiddenItem[]>;
 }
 
 const DEFAULT_SETTINGS: CheckerSettings = {
   action: "hide",
   skipResetNotes: true,
-  hiddenItems: {},
 };
 
-const DELAY_MS = 500;
-/** A checked task line, in any list style: "- [x]", "* [x]", "+ [x]", "1. [x]". */
-const CHECKED = /^(\s*(?:[-*+]|\d+[.)])\s+\[)[xX](\])/;
-const TASK_RESETTER_MARKER = /\[reset-tasks(?=[\s:\]])/i;
+/** How earlier versions kept hidden items, in the plugin's data; moved into the notes on load. */
+interface OldHiddenItem { lines?: string[]; line?: string; prevLine?: string | null; seq?: number }
 
-const isChecked = (line: string) => CHECKED.test(line);
-const indentOf = (line: string) => line.match(/^\s*/)![0].replace(/\t/g, "    ").length;
+const DELAY_MS = 500;
+const TASK_RESETTER_MARKER = /\[reset-tasks(?=[\s:\]])/i;
 
 export default class CheckerPlugin extends Plugin {
   settings!: CheckerSettings;
   private ribbonEl!: HTMLElement;
-  /** Tasks waiting out the delay, by file path and line text, so one check is acted on once. */
+  /** Tasks waiting out the delay, by file path, line and text, so one check is acted on once. */
   private pending = new Set<string>();
+  /**
+   * Each note's unchecked tasks as last seen on disk, to tell which got checked when a note changes
+   * outside the editor (reading view, a task list in another note, an embed, sync).
+   */
+  private seen = new Map<string, Map<string, number>>();
   /** Set while this plugin edits a note itself, so its own edits aren't taken for checks. */
   private applying = false;
 
   async onload() {
-    await this.loadSettings();
+    const data = (await this.loadData()) ?? {};
+    this.settings = { action: data.action ?? DEFAULT_SETTINGS.action, skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes };
     this.addSettingTab(new CheckerSettingTab(this.app, this));
 
     this.ribbonEl = this.addRibbonIcon("eye-off", "Show hidden items", () => this.toggleShowHidden());
@@ -54,21 +51,22 @@ export default class CheckerPlugin extends Plugin {
     this.registerEditorExtension(EditorView.updateListener.of((update: ViewUpdate) => {
       if (update.docChanged && !this.applying) this.onEditorUpdate(update);
     }));
+    this.registerEditorExtension(hideBlockInLivePreview);
 
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateRibbon()));
-    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-      const items = this.settings.hiddenItems[oldPath];
-      if (!items) return;
-      delete this.settings.hiddenItems[oldPath];
-      this.settings.hiddenItems[file.path] = items;
-      this.saveSettings();
-    }));
-    this.registerEvent(this.app.vault.on("delete", (file) => {
-      if (!this.settings.hiddenItems[file.path]) return;
-      delete this.settings.hiddenItems[file.path];
-      this.saveSettings();
-    }));
-    this.app.workspace.onLayoutReady(() => this.updateRibbon());
+    this.app.workspace.onLayoutReady(async () => {
+      if (data.hiddenItems) await this.moveOldItemsIntoNotes(data.hiddenItems);
+      this.updateRibbon();
+      await this.lookAtNotes();
+      this.registerEvent(this.app.vault.on("modify", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
+      this.registerEvent(this.app.vault.on("create", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
+      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+        const counts = this.seen.get(oldPath);
+        this.seen.delete(oldPath);
+        if (counts) this.seen.set(file.path, counts);
+      }));
+      this.registerEvent(this.app.vault.on("delete", (file) => this.seen.delete(file.path)));
+    });
   }
 
   private onEditorUpdate(update: ViewUpdate) {
@@ -88,11 +86,33 @@ export default class CheckerPlugin extends Plugin {
         if (before === line.text.replace(CHECKED, "$1 $2")) checked.push({ text: line.text, line: n - 1 });
       }
     });
+    this.schedule(file, checked, newDoc.toString());
+  }
+
+  /** Remembers the unchecked tasks of every note that has tasks, as a starting point. */
+  private async lookAtNotes() {
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!this.app.metadataCache.getFileCache(file)?.listItems?.some((i) => i.task !== undefined)) continue;
+      this.seen.set(file.path, uncheckedCounts(await this.app.vault.cachedRead(file)));
+    }
+  }
+
+  /** A note changed on disk: act on tasks checked outside the editor (the editor handles its own). */
+  private async onDiskChange(file: TFile) {
+    if (file.extension !== "md") return;
+    const text = await this.app.vault.cachedRead(file);
+    const before = this.seen.get(file.path);
+    this.seen.set(file.path, uncheckedCounts(text));
+    if (!before || this.applying || this.editorFor(file)) return;
+    this.schedule(file, newlyChecked(before, text), text);
+  }
+
+  private schedule(file: TFile, checked: { text: string; line: number }[], text: string) {
     if (!checked.length) return;
-    if (this.settings.skipResetNotes && TASK_RESETTER_MARKER.test(newDoc.toString())) return;
+    if (this.settings.skipResetNotes && TASK_RESETTER_MARKER.test(text)) return;
 
     for (const { text, line } of checked) {
-      const key = `${file.path}\n${text}`;
+      const key = `${file.path}\n${line}\n${text}`;
       if (this.pending.has(key)) continue;
       this.pending.add(key);
       window.setTimeout(() => {
@@ -102,159 +122,122 @@ export default class CheckerPlugin extends Plugin {
     }
   }
 
-  /** The open editor for this file, if any, so changes keep the cursor and can be undone. */
+  /**
+   * The open editor for this file, if any (in live preview or source mode, not reading view), so
+   * changes keep the cursor and can be undone.
+   */
   private editorFor(file: TFile): Editor | null {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const view = leaf.view;
-      if (view instanceof MarkdownView && view.file?.path === file.path) return view.editor;
+      if (view instanceof MarkdownView && view.file?.path === file.path && view.getMode() === "source") return view.editor;
     }
     return null;
   }
 
+  private async read(file: TFile) {
+    return this.editorFor(file)?.getValue() ?? this.app.vault.cachedRead(file);
+  }
+
+  /** Changes a note's text, in its open editor if it has one, else on disk. null leaves it as is. */
+  private async apply(file: TFile, change: (text: string) => string | null) {
+    const editor = this.editorFor(file);
+    if (editor) {
+      const old = editor.getValue();
+      const next = change(old);
+      if (next === null || next === old) return;
+      this.applying = true;
+      try { replaceLines(editor, old.split("\n"), next.split("\n")); } finally { this.applying = false; }
+    } else {
+      await this.app.vault.process(file, (text) => change(text) ?? text);
+    }
+  }
+
   /**
-   * Takes the checked task (and what's nested under it) out of the note, keeping it for later if
-   * hiding. If it was unchecked again in the meantime, it stays.
+   * Takes the checked task (and what's nested under it) out of the note, into the note's hidden
+   * items block if hiding. If it was unchecked again in the meantime, it stays.
    */
   private async takeOut(file: TFile, text: string, near: number) {
-    const editor = this.editorFor(file);
-    const lines = editor ? editor.getValue().split("\n") : (await this.app.vault.read(file)).split("\n");
-
-    // The same text may be on several lines; take the one closest to where it was checked.
-    let at = -1;
-    lines.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
-    if (at === -1) return;
-    const end = blockEnd(lines, at);
-
-    if (this.settings.action === "hide") {
-      const items = (this.settings.hiddenItems[file.path] ??= []);
-      const seq = items.reduce((m, h) => Math.max(m, h.seq), -1) + 1;
-      items.push({ lines: lines.slice(at, end), prevLine: at > 0 ? lines[at - 1] : null, seq });
-      await this.saveSettings();
-    }
-
-    if (editor) {
-      // Remove whole lines; at the end of the note, take the line break before them instead.
-      const from = end < lines.length ? { line: at, ch: 0 } : at > 0 ? { line: at - 1, ch: lines[at - 1].length } : { line: 0, ch: 0 };
-      const to = end < lines.length ? { line: end, ch: 0 } : { line: end - 1, ch: lines[end - 1].length };
-      this.edit(() => editor.replaceRange("", from, to));
-    } else {
-      await this.app.vault.process(file, (data) => {
-        const now = data.split("\n");
-        const i = now.indexOf(text);
-        if (i === -1) return data;
-        now.splice(i, blockEnd(now, i) - i);
-        return now.join("\n");
-      });
-    }
+    await this.apply(file, (content) => {
+      const note = parse(content);
+      const { body } = note;
+      // The same text may be on several lines; take the one closest to where it was checked.
+      let at = -1;
+      body.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
+      if (at === -1) return null;
+      const lines = body.splice(at, blockEnd(body, at) - at);
+      if (this.settings.action === "hide") note.entries.push({ kind: "hidden", after: at > 0 ? body[at - 1] : null, lines });
+      return serialize(note);
+    });
     this.updateRibbon();
-  }
-
-  private edit(change: () => void) {
-    this.applying = true;
-    try { change(); } finally { this.applying = false; }
-  }
-
-  /** Whether any of this note's hidden items are back in it (shown). */
-  private isShowing(path: string, lines: string[]) {
-    const present = new Set(lines);
-    return (this.settings.hiddenItems[path] ?? []).some((h) => present.has(h.lines[0]));
   }
 
   private async toggleShowHidden() {
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension !== "md") return;
-    const items = this.settings.hiddenItems[file.path] ?? [];
-    if (!items.length) {
+    if (!parse(await this.read(file)).entries.length) {
       new Notice("Nothing hidden in this note");
       return;
     }
-
-    const editor = this.editorFor(file);
-    const lines = editor ? editor.getValue().split("\n") : (await this.app.vault.read(file)).split("\n");
-    let next: string[];
-
-    if (!this.isShowing(file.path, lines)) {
-      // Put them back, latest first, so items hidden one after another stack in their old order.
-      next = [...lines];
-      for (const item of [...items].sort((a, b) => b.seq - a.seq)) {
-        const prev = item.prevLine === null ? -1 : next.indexOf(item.prevLine);
-        const at = item.prevLine === null ? 0 : prev === -1 ? next.length : blockEnd(next, prev);
-        next.splice(at, 0, ...item.lines);
+    await this.apply(file, (content) => {
+      const note = parse(content);
+      const { body } = note;
+      if (note.entries.some((e) => e.kind === "shown")) {
+        // Hide the shown ones again. Ones unchecked while shown stay as normal tasks; ones deleted
+        // are dropped.
+        note.entries = note.entries.flatMap((e): Entry[] => {
+          if (e.kind === "hidden") return [e];
+          const i = body.indexOf(e.line);
+          if (i === -1 || !isChecked(body[i])) return [];
+          const lines = body.splice(i, blockEnd(body, i) - i);
+          return [{ kind: "hidden", after: i > 0 ? body[i - 1] : null, lines }];
+        });
+      } else {
+        // Put them back, latest first, so items hidden one after another stack in their old order.
+        for (let k = note.entries.length - 1; k >= 0; k--) {
+          const e = note.entries[k];
+          if (e.kind !== "hidden") continue;
+          const prev = e.after === null ? -1 : body.indexOf(e.after);
+          const at = e.after === null ? 0 : prev === -1 ? body.length : blockEnd(body, prev);
+          body.splice(at, 0, ...e.lines);
+          note.entries[k] = { kind: "shown", line: e.lines[0] };
+        }
       }
-    } else {
-      // Hide them again. Ones unchecked while shown become normal tasks; ones deleted are dropped.
-      const keep: HiddenItem[] = [];
-      next = [...lines];
-      for (const item of items) {
-        const i = next.indexOf(item.lines[0]);
-        if (i === -1 || !isChecked(next[i])) continue;
-        const end = blockEnd(next, i);
-        keep.push({ ...item, lines: next.slice(i, end), prevLine: i > 0 ? next[i - 1] : null });
-        next.splice(i, end - i);
-      }
-      this.settings.hiddenItems[file.path] = keep;
-      if (!keep.length) delete this.settings.hiddenItems[file.path];
-      await this.saveSettings();
-    }
-
-    if (editor) this.edit(() => replaceLines(editor, lines, next));
-    else await this.app.vault.modify(file, next.join("\n"));
-    this.updateRibbon(next);
+      return serialize(note);
+    });
+    this.updateRibbon();
   }
 
-  private async updateRibbon(lines?: string[]) {
+  private async updateRibbon() {
     const file = this.app.workspace.getActiveFile();
-    let showing = false;
-    if (file && this.settings.hiddenItems[file.path]?.length) {
-      const editor = this.editorFor(file);
-      lines ??= editor ? editor.getValue().split("\n") : (await this.app.vault.cachedRead(file)).split("\n");
-      showing = this.isShowing(file.path, lines);
-    }
+    const showing = !!file && file.extension === "md" &&
+      parse(await this.read(file)).entries.some((e) => e.kind === "shown");
     setIcon(this.ribbonEl, showing ? "eye" : "eye-off");
     this.ribbonEl.setAttribute("aria-label", showing ? "Hide checked items" : "Show hidden items");
   }
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    // Older versions kept one line per item ({ line }); keep those as one-line items.
-    for (const [path, items] of Object.entries(this.settings.hiddenItems ?? {})) {
-      this.settings.hiddenItems[path] = (items as unknown[]).flatMap((raw, i) => {
-        const h = raw as Partial<HiddenItem> & { line?: string };
-        const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
-        return lines ? [{ lines, prevLine: h.prevLine ?? null, seq: h.seq ?? i }] : [];
+  /** Moves hidden items kept by earlier versions (in the plugin's data) into their notes. */
+  private async moveOldItemsIntoNotes(old: Record<string, OldHiddenItem[]>) {
+    for (const [path, items] of Object.entries(old)) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile) || !Array.isArray(items)) continue;
+      await this.apply(file, (content) => {
+        const note = parse(content);
+        const present = new Set(note.body);
+        for (const h of [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
+          const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
+          if (!lines?.length) continue;
+          // Ones shown at the moment are in the note already.
+          note.entries.push(present.has(lines[0]) ? { kind: "shown", line: lines[0] } : { kind: "hidden", after: h.prevLine ?? null, lines });
+        }
+        return serialize(note);
       });
     }
+    await this.saveSettings();
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
   }
-}
-
-/** Replaces only the lines that differ, so the cursor and scroll stay where they were. */
-function replaceLines(editor: Editor, old: string[], next: string[]) {
-  let head = 0;
-  while (head < old.length && head < next.length && old[head] === next[head]) head++;
-  let tail = 0;
-  while (tail < old.length - head && tail < next.length - head && old[old.length - 1 - tail] === next[next.length - 1 - tail]) tail++;
-  const end = { line: old.length - 1, ch: old[old.length - 1].length };
-  if (tail === 0) {
-    // The change reaches the end of the note: replace from the end of the last unchanged line.
-    const from = head > 0 ? { line: head - 1, ch: old[head - 1].length } : { line: 0, ch: 0 };
-    const rest = next.slice(head);
-    editor.replaceRange(head > 0 ? rest.map((l) => "\n" + l).join("") : rest.join("\n"), from, end);
-  } else {
-    const text = next.slice(head, next.length - tail).map((l) => l + "\n").join("");
-    editor.replaceRange(text, { line: head, ch: 0 }, { line: old.length - tail, ch: 0 });
-  }
-}
-
-/** The line after a task and the lines nested (indented) under it. */
-function blockEnd(lines: string[], at: number) {
-  const indent = indentOf(lines[at]);
-  let end = at + 1;
-  while (end < lines.length && lines[end].trim() !== "" && indentOf(lines[end]) > indent) end++;
-  return end;
 }
 
 class CheckerSettingTab extends PluginSettingTab {
@@ -271,10 +254,10 @@ class CheckerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Checked item behavior")
-      .setDesc("What to do when a todo item is checked off. Anything nested under it goes with it.")
+      .setDesc(`What to do when a todo item is checked off. Anything nested under it goes with it. Hidden items are kept at the bottom of the note, in a comment block ("${BLOCK_START}") that only shows in source mode.`)
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("hide", "Hide (saved, can be shown again from the sidebar)")
+          .addOption("hide", "Hide (kept in the note, can be shown again from the sidebar)")
           .addOption("delete", "Delete (removed for good)")
           .setValue(this.plugin.settings.action)
           .onChange(async (value: string) => {
