@@ -3,14 +3,15 @@
  * tasks, and reading and writing the block at the bottom of a note that keeps its hidden items:
  *
  *   %% Checker: hidden items
- *   after: "- [ ] Eggs"
+ *   after: "- [ ] Eggs" @3
  *   - [x] Milk
  *     - [x] brown
  *   shown: "- [x] Call the dentist"
  *   %%
  *
  * "after:" starts a hidden item and says which line it goes back under ("after: top" for the top of
- * the note); the item's lines follow. "shown:" is an item that's back in the note for now, so the
+ * the note), and after "@" the line number it was on, to tell copies of that line apart (a blank
+ * line, say); the item's lines follow. "shown:" is an item that's back in the note for now, so the
  * next toggle knows to hide it again.
  */
 
@@ -22,7 +23,7 @@ export const CHECKED = /^(\s*(?:[-*+]|\d+[.)])\s+\[)[xX](\])/;
 export const isChecked = (line: string) => CHECKED.test(line);
 
 export type Entry =
-  | { kind: "hidden"; after: string | null; lines: string[] }
+  | { kind: "hidden"; after: string | null; at: number | null; lines: string[] }
   | { kind: "shown"; line: string };
 
 export interface Note {
@@ -57,14 +58,14 @@ export function parse(text: string): Note {
 
   const entries: Entry[] = [];
   for (const line of lines.slice(start + 1, end)) {
-    const after = line.match(/^after: (.*)$/);
+    const after = line.match(/^after: (.*?)(?: @(\d+))?$/);
     const shown = line.match(/^shown: (.*)$/);
-    if (after) entries.push({ kind: "hidden", after: unquote(after[1]), lines: [] });
+    if (after) entries.push({ kind: "hidden", after: unquote(after[1]), at: after[2] ? +after[2] : null, lines: [] });
     else if (shown) entries.push({ kind: "shown", line: unquote(shown[1]) ?? "" });
     else {
       const last = entries[entries.length - 1];
       if (last?.kind === "hidden") last.lines.push(line);
-      else if (line.trim()) entries.push({ kind: "hidden", after: null, lines: [line] });
+      else if (line.trim()) entries.push({ kind: "hidden", after: null, at: null, lines: [line] });
     }
   }
   const body = [...lines.slice(0, start), ...lines.slice(end + 1)];
@@ -77,8 +78,67 @@ export function serialize(note: Note): string {
   const body = [...note.body];
   while (body.length && body[body.length - 1].trim() === "") body.pop();
   if (!note.entries.length) return body.join("\n") + "\n";
-  const block = note.entries.flatMap((e) => e.kind === "hidden" ? [`after: ${quote(e.after)}`, ...e.lines] : [`shown: ${quote(e.line)}`]);
+  const block = note.entries.flatMap((e) => e.kind === "hidden" ? [`after: ${quote(e.after)}${e.at == null ? "" : ` @${e.at}`}`, ...e.lines] : [`shown: ${quote(e.line)}`]);
   return [...body, ...(body.length ? [""] : []), BLOCK_START, ...block, BLOCK_END].join("\n") + "\n";
+}
+
+/** Takes the task at line [at] (and what's nested under it) out of the note's lines. */
+export function takeOutAt(note: Note, at: number, keep: boolean) {
+  const lines = note.body.splice(at, blockEnd(note.body, at) - at);
+  if (keep) note.entries.push({ kind: "hidden", after: at > 0 ? note.body[at - 1] : null, at, lines });
+}
+
+/**
+ * Where a hidden item goes back: under its "after" line, the copy nearest to where it was if that
+ * line is in the note more than once; where it was if that line is gone; at the top for "top".
+ */
+function placeFor(body: string[], e: { after: string | null; at: number | null }) {
+  if (e.after === null) return 0;
+  let best = -1;
+  body.forEach((l, i) => {
+    if (l !== e.after) return;
+    if (best === -1 || (e.at !== null && Math.abs(i - (e.at - 1)) < Math.abs(best - (e.at - 1)))) best = i;
+  });
+  if (best !== -1) return blockEnd(body, best);
+  return e.at === null ? body.length : Math.min(e.at, body.length);
+}
+
+/** Puts the hidden items back in the note, latest first, so ones hidden in a row keep their order. */
+export function showAll(note: Note) {
+  for (let k = note.entries.length - 1; k >= 0; k--) {
+    const e = note.entries[k];
+    if (e.kind !== "hidden") continue;
+    note.body.splice(placeFor(note.body, e), 0, ...e.lines);
+    note.entries[k] = { kind: "shown", line: e.lines[0] };
+  }
+}
+
+/** Hides the shown items again. Ones unchecked while shown stay as normal tasks; deleted ones are dropped. */
+export function hideShown(note: Note) {
+  note.entries = note.entries.flatMap((e): Entry[] => {
+    if (e.kind === "hidden") return [e];
+    const i = note.body.indexOf(e.line);
+    if (i === -1 || !isChecked(note.body[i])) return [];
+    const lines = note.body.splice(i, blockEnd(note.body, i) - i);
+    return [{ kind: "hidden", after: i > 0 ? note.body[i - 1] : null, at: i, lines }];
+  });
+}
+
+/**
+ * Deletes the note's completed tasks for good: the hidden ones from the block, and the ones shown at
+ * the moment from the note (with what's nested under them), unless unchecked since. Returns how many.
+ */
+export function deleteCompleted(note: Note) {
+  let count = 0;
+  for (const e of note.entries) {
+    if (e.kind === "hidden") { count++; continue; }
+    const i = note.body.indexOf(e.line);
+    if (i === -1 || !isChecked(note.body[i])) continue;
+    note.body.splice(i, blockEnd(note.body, i) - i);
+    count++;
+  }
+  note.entries = [];
+  return count;
 }
 
 interface LineEditor {

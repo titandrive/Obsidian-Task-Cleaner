@@ -1,29 +1,42 @@
-import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
+import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { hideBlockInLivePreview } from "./hide-block";
-import { BLOCK_START, CHECKED, Entry, blockEnd, isChecked, newlyChecked, parse, replaceLines, serialize, uncheckedCounts } from "./notes";
+import { BLOCK_START, CHECKED, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
 interface CheckerSettings {
   action: CheckedAction;
   skipResetNotes: boolean;
+  delayMs: number;
 }
 
 const DEFAULT_SETTINGS: CheckerSettings = {
   action: "hide",
   skipResetNotes: true,
+  delayMs: 500,
 };
+
+/** The choices for how long a checked task stays before it's hidden or deleted. */
+const DELAYS: [number, string][] = [
+  [0, "Right away"], [500, "Half a second"], [1000, "1 second"], [2000, "2 seconds"],
+  [3000, "3 seconds"], [5000, "5 seconds"], [10000, "10 seconds"], [30000, "30 seconds"],
+];
+
+/**
+ * A note changing on disk counts as you checking a task only this soon after you last clicked,
+ * tapped or typed in Obsidian. Changes that come in by sync (checked on another device) or from
+ * outside Obsidian are left alone; the device they were checked on handles them.
+ */
+const INPUT_WINDOW_MS = 2000;
 
 /** How earlier versions kept hidden items, in the plugin's data; moved into the notes on load. */
 interface OldHiddenItem { lines?: string[]; line?: string; prevLine?: string | null; seq?: number }
 
-const DELAY_MS = 500;
 const TASK_RESETTER_MARKER = /\[reset-tasks(?=[\s:\]])/i;
 
 export default class CheckerPlugin extends Plugin {
   settings!: CheckerSettings;
-  private ribbonEl!: HTMLElement;
   /** Tasks waiting out the delay, by file path, line and text, so one check is acted on once. */
   private pending = new Set<string>();
   /**
@@ -33,18 +46,48 @@ export default class CheckerPlugin extends Plugin {
   private seen = new Map<string, Map<string, number>>();
   /** Set while this plugin edits a note itself, so its own edits aren't taken for checks. */
   private applying = false;
+  /** When you last clicked, tapped or typed in Obsidian. */
+  private lastInput = 0;
+  private ribbonEl!: HTMLElement;
+  private command!: Command;
 
   async onload() {
     const data = (await this.loadData()) ?? {};
-    this.settings = { action: data.action ?? DEFAULT_SETTINGS.action, skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes };
+    this.settings = {
+      action: data.action ?? DEFAULT_SETTINGS.action,
+      skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes,
+      delayMs: typeof data.delayMs === "number" ? data.delayMs : DEFAULT_SETTINGS.delayMs,
+    };
     this.addSettingTab(new CheckerSettingTab(this.app, this));
 
-    this.ribbonEl = this.addRibbonIcon("eye-off", "Show hidden items", () => this.toggleShowHidden());
-    this.addCommand({
+    // Both say what they'll do in the current note: show its hidden tasks, or hide them again.
+    this.ribbonEl = this.addRibbonIcon("circle-dashed", "Show completed tasks", () => this.toggleShowHidden());
+    this.command = this.addCommand({
       id: "toggle-hidden-items",
-      name: "Show or hide checked items in this note",
+      name: "Show completed tasks",
       callback: () => this.toggleShowHidden(),
     });
+    this.addCommand({
+      id: "delete-completed-tasks",
+      name: "Delete completed tasks",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (this.settings.action !== "hide" || !file || file.extension !== "md") return false;
+        if (!checking) this.deleteCompletedTasks(file);
+        return true;
+      },
+    });
+    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateLabels()));
+    const input = () => { this.lastInput = Date.now(); };
+    this.registerDomEvent(document, "pointerdown", input, { capture: true });
+    this.registerDomEvent(document, "keydown", input, { capture: true });
+    // A note opened before its tasks were looked at (Obsidian still indexing at startup) gets looked
+    // at now, so a check in reading view is caught the first time.
+    this.registerEvent(this.app.workspace.on("file-open", async (file) => {
+      if (file?.extension === "md" && !this.seen.has(file.path)) {
+        this.seen.set(file.path, uncheckedCounts(await this.app.vault.cachedRead(file)));
+      }
+    }));
 
     // A task counts as checked off only when its box goes from [ ] to [x]. Typing or editing a
     // checked line, pasting checked lines, undo, or putting hidden items back don't count.
@@ -53,10 +96,8 @@ export default class CheckerPlugin extends Plugin {
     }));
     this.registerEditorExtension(hideBlockInLivePreview);
 
-    this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateRibbon()));
     this.app.workspace.onLayoutReady(async () => {
       if (data.hiddenItems) await this.moveOldItemsIntoNotes(data.hiddenItems);
-      this.updateRibbon();
       await this.lookAtNotes();
       this.registerEvent(this.app.vault.on("modify", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
       this.registerEvent(this.app.vault.on("create", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
@@ -66,7 +107,9 @@ export default class CheckerPlugin extends Plugin {
         if (counts) this.seen.set(file.path, counts);
       }));
       this.registerEvent(this.app.vault.on("delete", (file) => this.seen.delete(file.path)));
+      this.updateLabels();
     });
+    addCheckMark(this.ribbonEl);
   }
 
   private onEditorUpdate(update: ViewUpdate) {
@@ -103,7 +146,9 @@ export default class CheckerPlugin extends Plugin {
     const text = await this.app.vault.cachedRead(file);
     const before = this.seen.get(file.path);
     this.seen.set(file.path, uncheckedCounts(text));
+    if (file === this.app.workspace.getActiveFile()) this.updateLabels();
     if (!before || this.applying || this.editorFor(file)) return;
+    if (Date.now() - this.lastInput > INPUT_WINDOW_MS) return;
     this.schedule(file, newlyChecked(before, text), text);
   }
 
@@ -118,7 +163,7 @@ export default class CheckerPlugin extends Plugin {
       window.setTimeout(() => {
         this.pending.delete(key);
         this.takeOut(file, text, line);
-      }, DELAY_MS);
+      }, this.settings.delayMs);
     }
   }
 
@@ -159,16 +204,14 @@ export default class CheckerPlugin extends Plugin {
   private async takeOut(file: TFile, text: string, near: number) {
     await this.apply(file, (content) => {
       const note = parse(content);
-      const { body } = note;
       // The same text may be on several lines; take the one closest to where it was checked.
       let at = -1;
-      body.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
+      note.body.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
       if (at === -1) return null;
-      const lines = body.splice(at, blockEnd(body, at) - at);
-      if (this.settings.action === "hide") note.entries.push({ kind: "hidden", after: at > 0 ? body[at - 1] : null, lines });
+      takeOutAt(note, at, this.settings.action === "hide");
       return serialize(note);
     });
-    this.updateRibbon();
+    this.updateLabels();
   }
 
   private async toggleShowHidden() {
@@ -180,39 +223,38 @@ export default class CheckerPlugin extends Plugin {
     }
     await this.apply(file, (content) => {
       const note = parse(content);
-      const { body } = note;
-      if (note.entries.some((e) => e.kind === "shown")) {
-        // Hide the shown ones again. Ones unchecked while shown stay as normal tasks; ones deleted
-        // are dropped.
-        note.entries = note.entries.flatMap((e): Entry[] => {
-          if (e.kind === "hidden") return [e];
-          const i = body.indexOf(e.line);
-          if (i === -1 || !isChecked(body[i])) return [];
-          const lines = body.splice(i, blockEnd(body, i) - i);
-          return [{ kind: "hidden", after: i > 0 ? body[i - 1] : null, lines }];
-        });
-      } else {
-        // Put them back, latest first, so items hidden one after another stack in their old order.
-        for (let k = note.entries.length - 1; k >= 0; k--) {
-          const e = note.entries[k];
-          if (e.kind !== "hidden") continue;
-          const prev = e.after === null ? -1 : body.indexOf(e.after);
-          const at = e.after === null ? 0 : prev === -1 ? body.length : blockEnd(body, prev);
-          body.splice(at, 0, ...e.lines);
-          note.entries[k] = { kind: "shown", line: e.lines[0] };
-        }
-      }
+      if (note.entries.some((e) => e.kind === "shown")) hideShown(note);
+      else showAll(note);
       return serialize(note);
     });
-    this.updateRibbon();
+    this.updateLabels();
   }
 
-  private async updateRibbon() {
+  /** Deletes the note's completed tasks that Checker keeps, hidden or shown, for good. */
+  private async deleteCompletedTasks(file: TFile) {
+    let count = 0;
+    await this.apply(file, (content) => {
+      const note = parse(content);
+      count = deleteCompleted(note);
+      return count ? serialize(note) : null;
+    });
+    new Notice(count ? `Deleted ${count} completed task${count === 1 ? "" : "s"}` : "No completed tasks to delete in this note");
+    this.updateLabels();
+  }
+
+  /**
+   * Names the sidebar button and the command for what they'll do in the current note: "Hide" if its
+   * hidden tasks are showing (a solid circle), else "Show" (a dashed one).
+   */
+  private async updateLabels() {
     const file = this.app.workspace.getActiveFile();
     const showing = !!file && file.extension === "md" &&
       parse(await this.read(file)).entries.some((e) => e.kind === "shown");
-    setIcon(this.ribbonEl, showing ? "eye" : "eye-off");
-    this.ribbonEl.setAttribute("aria-label", showing ? "Hide checked items" : "Show hidden items");
+    const label = showing ? "Hide completed tasks" : "Show completed tasks";
+    setIcon(this.ribbonEl, showing ? "circle-check" : "circle-dashed");
+    if (!showing) addCheckMark(this.ribbonEl);
+    this.ribbonEl.setAttribute("aria-label", label);
+    this.command.name = `${this.manifest.name}: ${label}`;
   }
 
   /** Moves hidden items kept by earlier versions (in the plugin's data) into their notes. */
@@ -227,7 +269,7 @@ export default class CheckerPlugin extends Plugin {
           const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
           if (!lines?.length) continue;
           // Ones shown at the moment are in the note already.
-          note.entries.push(present.has(lines[0]) ? { kind: "shown", line: lines[0] } : { kind: "hidden", after: h.prevLine ?? null, lines });
+          note.entries.push(present.has(lines[0]) ? { kind: "shown", line: lines[0] } : { kind: "hidden", after: h.prevLine ?? null, at: null, lines });
         }
         return serialize(note);
       });
@@ -238,6 +280,18 @@ export default class CheckerPlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
+}
+
+/**
+ * Turns the circle-dashed icon into a dashed circle with a check (Obsidian's icon set has no
+ * circle-dashed-check), with the check mark from circle-check so the two match.
+ */
+function addCheckMark(el: HTMLElement) {
+  const svg = el.querySelector("svg");
+  if (!svg) return;
+  const check = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  check.setAttribute("d", "m9 12 2 2 4-4");
+  svg.appendChild(check);
 }
 
 class CheckerSettingTab extends PluginSettingTab {
@@ -265,6 +319,19 @@ class CheckerSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("Delay")
+      .setDesc("How long a checked item stays before it's hidden or deleted. Unchecking it in that time keeps it.")
+      .addDropdown((dropdown) => {
+        for (const [ms, label] of DELAYS) dropdown.addOption(String(ms), label);
+        const current = this.plugin.settings.delayMs;
+        if (!DELAYS.some(([ms]) => ms === current)) dropdown.addOption(String(current), `${current / 1000} seconds`);
+        dropdown.setValue(String(current)).onChange(async (value) => {
+          this.plugin.settings.delayMs = Number(value);
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(containerEl)
       .setName("Leave Task Resetter notes alone")
