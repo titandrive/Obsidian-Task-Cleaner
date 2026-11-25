@@ -1,7 +1,7 @@
 import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { hideBlockInLivePreview } from "./hide-block";
-import { BLOCK_START, CHECKED, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { BLOCK_START, CHECKED, IGNORE_KEY, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
@@ -50,6 +50,7 @@ export default class CheckerPlugin extends Plugin {
   private lastInput = 0;
   private ribbonEl!: HTMLElement;
   private command!: Command;
+  private ignoreCommand!: Command;
 
   async onload() {
     const data = (await this.loadData()) ?? {};
@@ -74,6 +75,17 @@ export default class CheckerPlugin extends Plugin {
         const file = this.app.workspace.getActiveFile();
         if (this.settings.action !== "hide" || !file || file.extension !== "md") return false;
         if (!checking) this.deleteCompletedTasks(file);
+        return true;
+      },
+    });
+    // Says what it'll do in the current note: ignore it, or stop ignoring it.
+    this.ignoreCommand = this.addCommand({
+      id: "toggle-ignore-note",
+      name: "Ignore this note",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || file.extension !== "md") return false;
+        if (!checking) this.toggleIgnore(file);
         return true;
       },
     });
@@ -155,6 +167,7 @@ export default class CheckerPlugin extends Plugin {
   private schedule(file: TFile, checked: { text: string; line: number }[], text: string) {
     if (!checked.length) return;
     if (this.settings.skipResetNotes && TASK_RESETTER_MARKER.test(text)) return;
+    if (isIgnored(text)) return;
 
     for (const { text, line } of checked) {
       const key = `${file.path}\n${line}\n${text}`;
@@ -243,13 +256,28 @@ export default class CheckerPlugin extends Plugin {
   }
 
   /**
+   * Sets or clears checker-ignore: true in the note's frontmatter. Ignored, Checker leaves its
+   * checked tasks where they are.
+   */
+  private async toggleIgnore(file: TFile) {
+    const ignored = isIgnored(await this.read(file));
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      if (ignored) delete fm[IGNORE_KEY];
+      else fm[IGNORE_KEY] = true;
+    });
+    new Notice(ignored ? "Checker now tracks this note" : "Checker now ignores this note");
+    window.setTimeout(() => this.updateLabels(), 300);
+  }
+
+  /**
    * Names the sidebar button and the command for what they'll do in the current note: "Hide" if its
    * hidden tasks are showing (a solid circle), else "Show" (a dashed one).
    */
   private async updateLabels() {
     const file = this.app.workspace.getActiveFile();
-    const showing = !!file && file.extension === "md" &&
-      parse(await this.read(file)).entries.some((e) => e.kind === "shown");
+    const text = file && file.extension === "md" ? await this.read(file) : "";
+    const showing = parse(text).entries.some((e) => e.kind === "shown");
+    this.ignoreCommand.name = `${this.manifest.name}: ${isIgnored(text) ? "Track this note" : "Ignore this note"}`;
     const label = showing ? "Hide completed tasks" : "Show completed tasks";
     setIcon(this.ribbonEl, showing ? "circle-check" : "circle-dashed");
     if (!showing) addCheckMark(this.ribbonEl);
@@ -308,7 +336,7 @@ class CheckerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Checked item behavior")
-      .setDesc(`What to do when a todo item is checked off. Anything nested under it goes with it. Hidden items are kept at the bottom of the note, in a comment block ("${BLOCK_START}") that only shows in source mode.`)
+      .setDesc(`What to do when a todo item is checked off. Anything nested under it goes with it. Hidden items are kept at the bottom of the note, in a comment block ("${BLOCK_START}") that only shows in source mode. To leave a note alone, add ${IGNORE_KEY}: true to its frontmatter, or run "Ignore this note".`)
       .addDropdown((dropdown) =>
         dropdown
           .addOption("hide", "Hide (kept in the note, can be shown again from the sidebar)")

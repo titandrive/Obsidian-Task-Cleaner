@@ -196,3 +196,12 @@ export function newlyChecked(before: Map<string, number>, text: string): { text:
   });
   return found;
 }
+
+/** The frontmatter property that makes Checker leave a note alone. */
+export const IGNORE_KEY = "checker-ignore";
+
+/** Whether the note's frontmatter has checker-ignore: true. */
+export function isIgnored(text: string): boolean {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  return !!m && new RegExp(`^${IGNORE_KEY}:\\s*["']?(true|yes)["']?\\s*$`, "im").test(m[1]);
+}
