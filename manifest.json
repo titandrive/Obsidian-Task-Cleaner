@@ -3,7 +3,7 @@
   "name": "Checker",
   "version": "1.0.3",
   "minAppVersion": "1.0.0",
-  "description": "Automatically hides completed todo items",
+  "description": "Hides checked-off tasks a moment after you check them, and keeps them in the note to bring back.",
   "author": "TitanDrive",
   "authorUrl": "https://github.com/titandrive/obsidian-checker",
   "isDesktopOnly": false
