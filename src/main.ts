@@ -1,17 +1,19 @@
 import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
 import { hideBlockInLivePreview } from "./hide-block";
-import { BLOCK_START, CHECKED, IGNORE_KEY, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { BLOCK_START, CHECKED, IGNORE_KEY, OLD_BLOCK_START, OLD_IGNORE_KEY, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
-interface CheckerSettings {
+interface TaskCleanerSettings {
   action: CheckedAction;
   skipResetNotes: boolean;
   delayMs: number;
+  /** Notes have been moved over from the plugin's old name (Checker). */
+  renamed?: boolean;
 }
 
-const DEFAULT_SETTINGS: CheckerSettings = {
+const DEFAULT_SETTINGS: TaskCleanerSettings = {
   action: "hide",
   skipResetNotes: true,
   delayMs: 500,
@@ -35,8 +37,8 @@ interface OldHiddenItem { lines?: string[]; line?: string; prevLine?: string | n
 
 const TASK_RESETTER_MARKER = /\[reset-tasks(?=[\s:\]])/i;
 
-export default class CheckerPlugin extends Plugin {
-  settings!: CheckerSettings;
+export default class TaskCleanerPlugin extends Plugin {
+  settings!: TaskCleanerSettings;
   /** Tasks waiting out the delay, by file path, line and text, so one check is acted on once. */
   private pending = new Set<string>();
   /**
@@ -58,8 +60,9 @@ export default class CheckerPlugin extends Plugin {
       action: data.action ?? DEFAULT_SETTINGS.action,
       skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes,
       delayMs: typeof data.delayMs === "number" ? data.delayMs : DEFAULT_SETTINGS.delayMs,
+      renamed: data.renamed === true,
     };
-    this.addSettingTab(new CheckerSettingTab(this.app, this));
+    this.addSettingTab(new TaskCleanerSettingTab(this.app, this));
 
     // Both say what they'll do in the current note: show its hidden tasks, or hide them again.
     this.ribbonEl = this.addRibbonIcon("circle-dashed", "Show completed tasks", () => this.toggleShowHidden());
@@ -110,6 +113,7 @@ export default class CheckerPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       if (data.hiddenItems) await this.moveOldItemsIntoNotes(data.hiddenItems);
+      if (!this.settings.renamed) await this.moveNotesToNewName();
       await this.lookAtNotes();
       this.registerEvent(this.app.vault.on("modify", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
       this.registerEvent(this.app.vault.on("create", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
@@ -243,7 +247,7 @@ export default class CheckerPlugin extends Plugin {
     this.updateLabels();
   }
 
-  /** Deletes the note's completed tasks that Checker keeps, hidden or shown, for good. */
+  /** Deletes the note's completed tasks that Task Cleaner keeps, hidden or shown, for good. */
   private async deleteCompletedTasks(file: TFile) {
     let count = 0;
     await this.apply(file, (content) => {
@@ -256,16 +260,16 @@ export default class CheckerPlugin extends Plugin {
   }
 
   /**
-   * Sets or clears checker-ignore: true in the note's frontmatter. Ignored, Checker leaves its
+   * Sets or clears task-cleaner-ignore: true in the note's frontmatter. Ignored, Task Cleaner leaves its
    * checked tasks where they are.
    */
   private async toggleIgnore(file: TFile) {
     const ignored = isIgnored(await this.read(file));
     await this.app.fileManager.processFrontMatter(file, (fm) => {
-      if (ignored) delete fm[IGNORE_KEY];
+      if (ignored) { delete fm[IGNORE_KEY]; delete fm[OLD_IGNORE_KEY]; }
       else fm[IGNORE_KEY] = true;
     });
-    new Notice(ignored ? "Checker now tracks this note" : "Checker now ignores this note");
+    new Notice(ignored ? "Task Cleaner now tracks this note" : "Task Cleaner now ignores this note");
     window.setTimeout(() => this.updateLabels(), 300);
   }
 
@@ -305,6 +309,26 @@ export default class CheckerPlugin extends Plugin {
     await this.saveSettings();
   }
 
+  /**
+   * Once, after the rename from Checker: notes' hidden-items blocks and ignore properties get the
+   * new names. (The old ones are still read, so nothing breaks if a note is missed.)
+   */
+  private async moveNotesToNewName() {
+    const oldKey = new RegExp(`^${OLD_IGNORE_KEY}:`, "m");
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const text = await this.app.vault.cachedRead(file);
+      if (!text.includes(OLD_BLOCK_START) && !oldKey.test(text)) continue;
+      await this.app.vault.process(file, (data) => {
+        let next = data.split("\n").map((l) => (l.trim() === OLD_BLOCK_START ? BLOCK_START : l)).join("\n");
+        const fm = next.match(/^---\r?\n[\s\S]*?\r?\n---/);
+        if (fm) next = fm[0].replace(new RegExp(`^${OLD_IGNORE_KEY}:`, "m"), `${IGNORE_KEY}:`) + next.slice(fm[0].length);
+        return next;
+      });
+    }
+    this.settings.renamed = true;
+    await this.saveSettings();
+  }
+
   async saveSettings() {
     await this.saveData(this.settings);
   }
@@ -322,10 +346,10 @@ function addCheckMark(el: HTMLElement) {
   svg.appendChild(check);
 }
 
-class CheckerSettingTab extends PluginSettingTab {
-  plugin: CheckerPlugin;
+class TaskCleanerSettingTab extends PluginSettingTab {
+  plugin: TaskCleanerPlugin;
 
-  constructor(app: App, plugin: CheckerPlugin) {
+  constructor(app: App, plugin: TaskCleanerPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }

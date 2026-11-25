@@ -1,6 +1,6 @@
-# Checker
+# Task Cleaner
 
-Check off a task and it gets out of the way: Checker hides it (or deletes it) a moment later, and keeps hidden tasks in the note so you can bring them back with a click.
+Check off a task and it gets out of the way: Task Cleaner hides it (or deletes it) a moment later, and keeps hidden tasks in the note so you can bring them back with a click.
 
 ## How it works
 
@@ -23,14 +23,14 @@ While they're shown:
 - Delete one and it's gone for good.
 - Check another task and it's hidden as usual.
 
-**Delete completed tasks** (Hide mode only) deletes all of the note's completed tasks that Checker keeps, hidden or shown.
+**Delete completed tasks** (Hide mode only) deletes all of the note's completed tasks that Task Cleaner keeps, hidden or shown.
 
 ## Where hidden tasks are kept
 
 In the note itself, at the bottom, so they sync and move with it:
 
 ```markdown
-%% Checker: hidden items
+%% Task Cleaner: hidden items
 after: "- [ ] Milk" @3
 - [x] Eggs
 	- [x] brown
@@ -45,11 +45,11 @@ The block only shows in source mode. In live preview it's hidden, the cursor ski
 
 ## Leaving a note alone
 
-Add this to a note's frontmatter and Checker won't touch its checked tasks:
+Add this to a note's frontmatter and Task Cleaner won't touch its checked tasks:
 
 ```yaml
 ---
-checker-ignore: true
+task-cleaner-ignore: true
 ---
 ```
 
@@ -65,14 +65,16 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 
 ## QuickNote
 
-The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Checker's settings: a task ticked on the widget is hidden (or deleted) into the same block, after the same delay. It doesn't know about `checker-ignore` yet.
+The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) into the same block, after the same delay. It doesn't know about `task-cleaner-ignore` yet.
 
 ## Install
 
 Not on the community plugin store; install it with [BRAT](https://github.com/TfTHacker/obsidian42-brat):
 
 1. Install and enable BRAT.
-2. BRAT → **Add beta plugin** → `titandrive/obsidian-checker`.
-3. Enable **Checker** under Settings → Community plugins.
+2. BRAT → **Add beta plugin** → `titandrive/Obsidian-Task-Cleaner`.
+3. Enable **Task Cleaner** under Settings → Community plugins.
 
-Or copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/checker/` in your vault.
+Or copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/task-cleaner/` in your vault.
+
+Task Cleaner used to be called Checker. Notes from then keep working: the old `%% Checker: hidden items` blocks and `checker-ignore` properties are still read, and are switched to the new names the first time Task Cleaner runs.

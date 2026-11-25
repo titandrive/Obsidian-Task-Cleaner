@@ -1,8 +1,8 @@
 /**
- * The note text side of Checker, with no Obsidian in it (so it can be tested on its own): finding
+ * The note text side of Task Cleaner, with no Obsidian in it (so it can be tested on its own): finding
  * tasks, and reading and writing the block at the bottom of a note that keeps its hidden items:
  *
- *   %% Checker: hidden items
+ *   %% Task Cleaner: hidden items
  *   after: "- [ ] Eggs" @3
  *   - [x] Milk
  *     - [x] brown
@@ -15,7 +15,10 @@
  * next toggle knows to hide it again.
  */
 
-export const BLOCK_START = "%% Checker: hidden items";
+export const BLOCK_START = "%% Task Cleaner: hidden items";
+/** The block's first line from when the plugin was called Checker; still read, written anew. */
+export const OLD_BLOCK_START = "%% Checker: hidden items";
+export const isBlockStart = (line: string) => line.trim() === BLOCK_START || line.trim() === OLD_BLOCK_START;
 const BLOCK_END = "%%";
 
 /** A checked task line, in any list style: "- [x]", "* [x]", "+ [x]", "1. [x]". */
@@ -51,7 +54,7 @@ function unquote(text: string): string | null {
 
 export function parse(text: string): Note {
   const lines = text.split("\n");
-  const start = lines.findIndex((l) => l.trim() === BLOCK_START);
+  const start = lines.findIndex(isBlockStart);
   if (start === -1) return { body: lines, entries: [], hadBlock: false };
   let end = lines.findIndex((l, i) => i > start && l.trim() === BLOCK_END);
   if (end === -1) end = lines.length;
@@ -197,11 +200,13 @@ export function newlyChecked(before: Map<string, number>, text: string): { text:
   return found;
 }
 
-/** The frontmatter property that makes Checker leave a note alone. */
-export const IGNORE_KEY = "checker-ignore";
+/** The frontmatter property that makes Task Cleaner leave a note alone. */
+export const IGNORE_KEY = "task-cleaner-ignore";
+/** The same, from when the plugin was called Checker; still read. */
+export const OLD_IGNORE_KEY = "checker-ignore";
 
-/** Whether the note's frontmatter has checker-ignore: true. */
+/** Whether the note's frontmatter has task-cleaner-ignore: true (or the older checker-ignore: true). */
 export function isIgnored(text: string): boolean {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  return !!m && new RegExp(`^${IGNORE_KEY}:\\s*["']?(true|yes)["']?\\s*$`, "im").test(m[1]);
+  return !!m && new RegExp(`^(?:${IGNORE_KEY}|${OLD_IGNORE_KEY}):\\s*["']?(true|yes)["']?\\s*$`, "im").test(m[1]);
 }

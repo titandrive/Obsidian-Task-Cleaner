@@ -1,13 +1,13 @@
 import { EditorState, StateField, Transaction } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
 import { editorLivePreviewField } from "obsidian";
-import { BLOCK_START } from "./notes";
+import { isBlockStart } from "./notes";
 
 /**
  * The hidden-items block at the bottom of a note, in live preview: hidden (Obsidian shows comments
  * there, faded), skipped over by the cursor, and safe from typing and deleting, so it can't be
  * broken without seeing it. In source mode it's shown and edited like any text; reading view hides
- * comments on its own. Checker's own changes (not typing) still go through.
+ * comments on its own. Task Cleaner's own changes (not typing) still go through.
  */
 export const hideBlockInLivePreview = [
   StateField.define<DecorationSet>({
@@ -33,7 +33,7 @@ function blockRange(state: EditorState): { from: number; to: number } | null {
   if (!state.field(editorLivePreviewField, false)) return null;
   const doc = state.doc;
   for (let n = doc.lines; n >= 1; n--) {
-    if (doc.line(n).text.trim() !== BLOCK_START) continue;
+    if (!isBlockStart(doc.line(n).text)) continue;
     // Only a block with its closing line: without one it would hide the rest of the note, so it's
     // left showing.
     for (let end = n + 1; end <= doc.lines; end++) {

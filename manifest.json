@@ -1,10 +1,10 @@
 {
-  "id": "checker",
-  "name": "Checker",
+  "id": "task-cleaner",
+  "name": "Task Cleaner",
   "version": "1.0.3",
   "minAppVersion": "1.0.0",
   "description": "Hides checked-off tasks a moment after you check them, and keeps them in the note to bring back.",
   "author": "TitanDrive",
-  "authorUrl": "https://github.com/titandrive/obsidian-checker",
+  "authorUrl": "https://github.com/titandrive/Obsidian-Task-Cleaner",
   "isDesktopOnly": false
 }
