@@ -1,6 +1,9 @@
 /**
  * The note text side of Task Cleaner, with no Obsidian in it (so it can be tested on its own): finding
- * tasks, and reading and writing the block at the bottom of a note that keeps its hidden items:
+ * tasks, taking them out and putting them back.
+ *
+ * A note's hidden items are kept in the plugin's settings. Earlier versions kept them in a block at
+ * the bottom of the note, which is still read so it can be moved into the settings:
  *
  *   %% Task Cleaner: hidden items
  *   after: "- [ ] Eggs" @3
@@ -25,9 +28,14 @@ const BLOCK_END = "%%";
 export const CHECKED = /^(\s*(?:[-*+]|\d+[.)])\s+\[)[xX](\])/;
 export const isChecked = (line: string) => CHECKED.test(line);
 
+/**
+ * A note's hidden item: its lines, the line it goes back under (null for the top of the note) and
+ * the line number it was on, to tell copies of that line apart; when it was hidden, for purging. A
+ * shown one is back in the note for now, so the next toggle hides it again.
+ */
 export type Entry =
-  | { kind: "hidden"; after: string | null; at: number | null; lines: string[] }
-  | { kind: "shown"; line: string };
+  | { kind: "hidden"; after: string | null; at: number | null; lines: string[]; hiddenAt?: number }
+  | { kind: "shown"; line: string; hiddenAt?: number };
 
 export interface Note {
   body: string[];      // the note's lines, without the block
@@ -88,7 +96,7 @@ export function serialize(note: Note): string {
 /** Takes the task at line [at] (and what's nested under it) out of the note's lines. */
 export function takeOutAt(note: Note, at: number, keep: boolean) {
   const lines = note.body.splice(at, blockEnd(note.body, at) - at);
-  if (keep) note.entries.push({ kind: "hidden", after: at > 0 ? note.body[at - 1] : null, at, lines });
+  if (keep) note.entries.push({ kind: "hidden", after: at > 0 ? note.body[at - 1] : null, at, lines, hiddenAt: Date.now() });
 }
 
 /**
@@ -112,7 +120,7 @@ export function showAll(note: Note) {
     const e = note.entries[k];
     if (e.kind !== "hidden") continue;
     note.body.splice(placeFor(note.body, e), 0, ...e.lines);
-    note.entries[k] = { kind: "shown", line: e.lines[0] };
+    note.entries[k] = { kind: "shown", line: e.lines[0], hiddenAt: e.hiddenAt };
   }
 }
 
@@ -123,7 +131,7 @@ export function hideShown(note: Note) {
     const i = note.body.indexOf(e.line);
     if (i === -1 || !isChecked(note.body[i])) return [];
     const lines = note.body.splice(i, blockEnd(note.body, i) - i);
-    return [{ kind: "hidden", after: i > 0 ? note.body[i - 1] : null, at: i, lines }];
+    return [{ kind: "hidden", after: i > 0 ? note.body[i - 1] : null, at: i, lines, hiddenAt: e.hiddenAt ?? Date.now() }];
   });
 }
 
@@ -142,6 +150,15 @@ export function deleteCompleted(note: Note) {
   }
   note.entries = [];
   return count;
+}
+
+/** The hidden items older than [days] (not shown ones), dropped. Returns how many. */
+export function purge(entries: Entry[], days: number, now = Date.now()): number {
+  if (days <= 0) return 0;
+  const before = entries.length;
+  const keep = entries.filter((e) => e.kind === "shown" || e.hiddenAt === undefined || now - e.hiddenAt < days * 86_400_000);
+  entries.splice(0, entries.length, ...keep);
+  return before - keep.length;
 }
 
 interface LineEditor {

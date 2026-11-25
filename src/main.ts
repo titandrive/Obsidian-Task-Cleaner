@@ -1,7 +1,6 @@
-import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, setIcon } from "obsidian";
+import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, normalizePath, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
-import { hideBlockInLivePreview } from "./hide-block";
-import { BLOCK_START, CHECKED, IGNORE_KEY, OLD_BLOCK_START, OLD_IGNORE_KEY, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { CHECKED, Entry, IGNORE_KEY, Note, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
@@ -9,15 +8,30 @@ interface TaskCleanerSettings {
   action: CheckedAction;
   skipResetNotes: boolean;
   delayMs: number;
-  /** Notes have been moved over from the plugin's old name (Checker). */
-  renamed?: boolean;
+  /** Hidden items older than this many days are dropped; 0 keeps them for good. */
+  purgeDays: number;
+  /** Each note's hidden items, by the note's path. */
+  hidden: Record<string, Entry[]>;
 }
 
 const DEFAULT_SETTINGS: TaskCleanerSettings = {
   action: "hide",
   skipResetNotes: true,
   delayMs: 500,
+  purgeDays: 30,
+  hidden: {},
 };
+
+/** The choices for how long hidden items are kept. */
+const PURGES: [number, string][] = [
+  [1, "1 day"], [7, "1 week"], [14, "2 weeks"], [30, "30 days"], [90, "90 days"], [365, "1 year"], [0, "Never"],
+];
+
+/**
+ * The QuickNote Android widget hides tasks too, but can't safely write the settings while Obsidian
+ * may be holding them, so it adds them to this file next to them, which is taken in from time to time.
+ */
+const INBOX = "widget-inbox.json";
 
 /** The choices for how long a checked task stays before it's hidden or deleted. */
 const DELAYS: [number, string][] = [
@@ -60,7 +74,8 @@ export default class TaskCleanerPlugin extends Plugin {
       action: data.action ?? DEFAULT_SETTINGS.action,
       skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes,
       delayMs: typeof data.delayMs === "number" ? data.delayMs : DEFAULT_SETTINGS.delayMs,
-      renamed: data.renamed === true,
+      purgeDays: typeof data.purgeDays === "number" ? data.purgeDays : DEFAULT_SETTINGS.purgeDays,
+      hidden: data.hidden && typeof data.hidden === "object" && !Array.isArray(data.hidden) ? data.hidden : {},
     };
     this.addSettingTab(new TaskCleanerSettingTab(this.app, this));
 
@@ -109,11 +124,12 @@ export default class TaskCleanerPlugin extends Plugin {
     this.registerEditorExtension(EditorView.updateListener.of((update: ViewUpdate) => {
       if (update.docChanged && !this.applying) this.onEditorUpdate(update);
     }));
-    this.registerEditorExtension(hideBlockInLivePreview);
 
     this.app.workspace.onLayoutReady(async () => {
-      if (data.hiddenItems) await this.moveOldItemsIntoNotes(data.hiddenItems);
-      if (!this.settings.renamed) await this.moveNotesToNewName();
+      if (data.hiddenItems) this.takeInOldItems(data.hiddenItems);
+      await this.moveBlocksIntoSettings();
+      await this.takeInWidgetInbox();
+      await this.purgeOld();
       await this.lookAtNotes();
       this.registerEvent(this.app.vault.on("modify", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
       this.registerEvent(this.app.vault.on("create", (file) => { if (file instanceof TFile) this.onDiskChange(file); }));
@@ -121,8 +137,24 @@ export default class TaskCleanerPlugin extends Plugin {
         const counts = this.seen.get(oldPath);
         this.seen.delete(oldPath);
         if (counts) this.seen.set(file.path, counts);
+        const items = this.settings.hidden[oldPath];
+        if (items) {
+          delete this.settings.hidden[oldPath];
+          this.settings.hidden[file.path] = items;
+          this.saveSettings();
+        }
       }));
-      this.registerEvent(this.app.vault.on("delete", (file) => this.seen.delete(file.path)));
+      this.registerEvent(this.app.vault.on("delete", (file) => {
+        this.seen.delete(file.path);
+        if (this.settings.hidden[file.path]) {
+          delete this.settings.hidden[file.path];
+          this.saveSettings();
+        }
+      }));
+      // The widget's hidden tasks: taken in when Obsidian comes to the front, and now and then.
+      this.registerDomEvent(window, "focus", () => this.takeInWidgetInbox());
+      this.registerInterval(window.setInterval(() => this.takeInWidgetInbox(), 60_000));
+      this.registerInterval(window.setInterval(() => this.purgeOld(), 6 * 3_600_000));
       this.updateLabels();
     });
     addCheckMark(this.ribbonEl);
@@ -215,18 +247,35 @@ export default class TaskCleanerPlugin extends Plugin {
   }
 
   /**
-   * Takes the checked task (and what's nested under it) out of the note, into the note's hidden
-   * items block if hiding. If it was unchecked again in the meantime, it stays.
+   * Changes a note and its hidden items together. [change] gets the note's lines and items (with any
+   * old block in the note moved into the items) and says whether it changed anything.
    */
-  private async takeOut(file: TFile, text: string, near: number) {
+  private async withNote(file: TFile, change: (note: Note) => boolean) {
+    let changed = false;
     await this.apply(file, (content) => {
       const note = parse(content);
+      note.entries = [...(this.settings.hidden[file.path] ?? []), ...note.entries.map(stamp)];
+      changed = change(note) || note.hadBlock;
+      if (!changed) return null;
+      if (note.entries.length) this.settings.hidden[file.path] = note.entries;
+      else delete this.settings.hidden[file.path];
+      return serialize({ ...note, entries: [] });
+    });
+    if (changed) await this.saveSettings();
+  }
+
+  /**
+   * Takes the checked task (and what's nested under it) out of the note, into its hidden items if
+   * hiding. If it was unchecked again in the meantime, it stays.
+   */
+  private async takeOut(file: TFile, text: string, near: number) {
+    await this.withNote(file, (note) => {
       // The same text may be on several lines; take the one closest to where it was checked.
       let at = -1;
       note.body.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
-      if (at === -1) return null;
+      if (at === -1) return false;
       takeOutAt(note, at, this.settings.action === "hide");
-      return serialize(note);
+      return true;
     });
     this.updateLabels();
   }
@@ -234,26 +283,26 @@ export default class TaskCleanerPlugin extends Plugin {
   private async toggleShowHidden() {
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension !== "md") return;
-    if (!parse(await this.read(file)).entries.length) {
+    await this.takeInWidgetInbox();
+    if (!(this.settings.hidden[file.path]?.length || parse(await this.read(file)).entries.length)) {
       new Notice("Nothing hidden in this note");
       return;
     }
-    await this.apply(file, (content) => {
-      const note = parse(content);
+    await this.withNote(file, (note) => {
       if (note.entries.some((e) => e.kind === "shown")) hideShown(note);
       else showAll(note);
-      return serialize(note);
+      return true;
     });
     this.updateLabels();
   }
 
   /** Deletes the note's completed tasks that Task Cleaner keeps, hidden or shown, for good. */
   private async deleteCompletedTasks(file: TFile) {
+    await this.takeInWidgetInbox();
     let count = 0;
-    await this.apply(file, (content) => {
-      const note = parse(content);
+    await this.withNote(file, (note) => {
       count = deleteCompleted(note);
-      return count ? serialize(note) : null;
+      return count > 0;
     });
     new Notice(count ? `Deleted ${count} completed task${count === 1 ? "" : "s"}` : "No completed tasks to delete in this note");
     this.updateLabels();
@@ -280,7 +329,7 @@ export default class TaskCleanerPlugin extends Plugin {
   private async updateLabels() {
     const file = this.app.workspace.getActiveFile();
     const text = file && file.extension === "md" ? await this.read(file) : "";
-    const showing = parse(text).entries.some((e) => e.kind === "shown");
+    const showing = !!file && [...(this.settings.hidden[file.path] ?? []), ...parse(text).entries].some((e) => e.kind === "shown");
     this.ignoreCommand.name = `${this.manifest.name}: ${isIgnored(text) ? "Track this note" : "Ignore this note"}`;
     const label = showing ? "Hide completed tasks" : "Show completed tasks";
     setIcon(this.ribbonEl, showing ? "circle-check" : "circle-dashed");
@@ -289,49 +338,69 @@ export default class TaskCleanerPlugin extends Plugin {
     this.command.name = `${this.manifest.name}: ${label}`;
   }
 
-  /** Moves hidden items kept by earlier versions (in the plugin's data) into their notes. */
-  private async moveOldItemsIntoNotes(old: Record<string, OldHiddenItem[]>) {
+  /** Hidden items kept by the first versions (one list per note, in the settings) taken in. */
+  private takeInOldItems(old: Record<string, OldHiddenItem[]>) {
     for (const [path, items] of Object.entries(old)) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile) || !Array.isArray(items)) continue;
-      await this.apply(file, (content) => {
-        const note = parse(content);
-        const present = new Set(note.body);
-        for (const h of [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
-          const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
-          if (!lines?.length) continue;
-          // Ones shown at the moment are in the note already.
-          note.entries.push(present.has(lines[0]) ? { kind: "shown", line: lines[0] } : { kind: "hidden", after: h.prevLine ?? null, at: null, lines });
-        }
-        return serialize(note);
-      });
+      if (!Array.isArray(items)) continue;
+      const list = (this.settings.hidden[path] ??= []);
+      for (const h of [...items].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
+        const lines = h.lines ?? (typeof h.line === "string" ? [h.line] : null);
+        if (lines?.length) list.push({ kind: "hidden", after: h.prevLine ?? null, at: null, lines, hiddenAt: Date.now() });
+      }
+    }
+  }
+
+  /**
+   * Notes that still have a hidden-items block at the bottom (from versions that kept them in the
+   * note, or the widget before it was updated): its items move into the settings, and the block out
+   * of the note.
+   */
+  private async moveBlocksIntoSettings() {
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const text = await this.app.vault.cachedRead(file);
+      if (!text.split("\n").some(isBlockStart)) continue;
+      await this.withNote(file, () => false);
     }
     await this.saveSettings();
   }
 
-  /**
-   * Once, after the rename from Checker: notes' hidden-items blocks and ignore properties get the
-   * new names. (The old ones are still read, so nothing breaks if a note is missed.)
-   */
-  private async moveNotesToNewName() {
-    const oldKey = new RegExp(`^${OLD_IGNORE_KEY}:`, "m");
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      const text = await this.app.vault.cachedRead(file);
-      if (!text.includes(OLD_BLOCK_START) && !oldKey.test(text)) continue;
-      await this.app.vault.process(file, (data) => {
-        let next = data.split("\n").map((l) => (l.trim() === OLD_BLOCK_START ? BLOCK_START : l)).join("\n");
-        const fm = next.match(/^---\r?\n[\s\S]*?\r?\n---/);
-        if (fm) next = fm[0].replace(new RegExp(`^${OLD_IGNORE_KEY}:`, "m"), `${IGNORE_KEY}:`) + next.slice(fm[0].length);
-        return next;
-      });
+  /** Takes in tasks the QuickNote widget hid, from its inbox file next to the settings. */
+  private async takeInWidgetInbox() {
+    const path = normalizePath(`${this.manifest.dir}/${INBOX}`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(path))) return;
+    let items: (Entry & { path: string })[] = [];
+    try { items = JSON.parse(await adapter.read(path)); } catch { return; }
+    await adapter.remove(path);
+    if (!Array.isArray(items) || !items.length) return;
+    for (const { path: note, ...item } of items) {
+      if (typeof note !== "string" || item.kind !== "hidden" || !Array.isArray(item.lines)) continue;
+      (this.settings.hidden[note] ??= []).push(stamp(item as Entry));
     }
-    this.settings.renamed = true;
     await this.saveSettings();
+    this.updateLabels();
   }
+
+  /** Drops hidden items older than the purge setting. */
+  private async purgeOld() {
+    let dropped = 0;
+    for (const [path, entries] of Object.entries(this.settings.hidden)) {
+      dropped += purge(entries, this.settings.purgeDays);
+      if (!entries.length) delete this.settings.hidden[path];
+    }
+    if (dropped) await this.saveSettings();
+  }
+
+  purgeNow() { return this.purgeOld(); }
 
   async saveSettings() {
     await this.saveData(this.settings);
   }
+}
+
+/** An item with when it was hidden; ones from before that was kept count from now. */
+function stamp(e: Entry): Entry {
+  return e.hiddenAt === undefined ? { ...e, hiddenAt: Date.now() } : e;
 }
 
 /**
@@ -360,11 +429,11 @@ class TaskCleanerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Checked item behavior")
-      .setDesc(`What to do when a todo item is checked off. Anything nested under it goes with it. Hidden items are kept at the bottom of the note, in a comment block ("${BLOCK_START}") that only shows in source mode. To leave a note alone, add ${IGNORE_KEY}: true to its frontmatter, or run "Ignore this note".`)
+      .setDesc(`What to do when a todo item is checked off. Anything nested under it goes with it. To leave a note alone, add ${IGNORE_KEY}: true to its frontmatter, or run "Ignore this note".`)
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("hide", "Hide (kept in the note, can be shown again from the sidebar)")
-          .addOption("delete", "Delete (removed for good)")
+          .addOption("hide", "Hide")
+          .addOption("delete", "Delete")
           .setValue(this.plugin.settings.action)
           .onChange(async (value: string) => {
             this.plugin.settings.action = value as CheckedAction;
@@ -382,6 +451,18 @@ class TaskCleanerSettingTab extends PluginSettingTab {
         dropdown.setValue(String(current)).onChange(async (value) => {
           this.plugin.settings.delayMs = Number(value);
           await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Purge hidden items")
+      .setDesc("How long hidden items are kept before they're deleted for good. Items shown in a note at the time stay.")
+      .addDropdown((dropdown) => {
+        for (const [days, label] of PURGES) dropdown.addOption(String(days), label);
+        dropdown.setValue(String(this.plugin.settings.purgeDays)).onChange(async (value) => {
+          this.plugin.settings.purgeDays = Number(value);
+          await this.plugin.saveSettings();
+          await this.plugin.purgeNow();
         });
       });
 

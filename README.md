@@ -1,12 +1,12 @@
 # Task Cleaner
 
-Check off a task and it gets out of the way: Task Cleaner hides it (or deletes it) a moment later, and keeps hidden tasks in the note so you can bring them back with a click.
+Check off a task and it gets out of the way: Task Cleaner hides it (or deletes it) a moment later, and keeps them so you can bring them back with a click.
 
 ## How it works
 
 Check a task, in any list style (`- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`). Half a second later (the delay is a setting) the task, with anything nested under it, is taken out of the note:
 
-- **Hide** (the default): it moves into a comment block at the bottom of the note, which Obsidian doesn't show in live preview or reading view.
+- **Hide** (the default): it's kept by Task Cleaner, ready to be shown again.
 - **Delete**: it's removed for good.
 
 Changed your mind? Uncheck it during the delay and it stays. In the editor, Ctrl/Cmd+Z puts it back.
@@ -27,21 +27,9 @@ While they're shown:
 
 ## Where hidden tasks are kept
 
-In the note itself, at the bottom, so they sync and move with it:
+In Task Cleaner's settings file (`.obsidian/plugins/task-cleaner/data.json`), listed by note, so nothing is added to your notes. Each one remembers the line it was under and the line number it was on, so it goes back to the right place even when a line is repeated. They follow a note when it's renamed, and are dropped when the note is deleted.
 
-```markdown
-%% Task Cleaner: hidden items
-after: "- [ ] Milk" @3
-- [x] Eggs
-	- [x] brown
-after: top @0
-- [x] Call the dentist
-%%
-```
-
-Each `after:` line says which line the task goes back under, and the line number it was on (to tell repeated lines apart); the task's own lines follow. While tasks are shown, they're listed as `shown: "..."` instead.
-
-The block only shows in source mode. In live preview it's hidden, the cursor skips over it, and typing or deleting can't change it, so it can't get broken by accident. Edit it in source mode if you need to.
+Hidden tasks are deleted for good after a while (**Purge hidden items** in settings, 30 days by default). Tasks shown in a note at the time stay.
 
 ## Leaving a note alone
 
@@ -61,11 +49,12 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 
 - **Checked item behavior:** Hide (the default) or Delete.
 - **Delay:** how long a checked task stays before it's hidden or deleted. Right away, half a second (the default), 1, 2, 3, 5, 10 or 30 seconds.
+- **Purge hidden items:** how long hidden tasks are kept. 1 day, 1 week, 2 weeks, 30 days (the default), 90 days, 1 year, or never.
 - **Leave Task Resetter notes alone:** on by default.
 
 ## QuickNote
 
-The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) into the same block, after the same delay, and ignored notes are left alone.
+The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) after the same delay, and ignored notes are left alone. The widget leaves hidden tasks in `widget-inbox.json` next to the settings, which Task Cleaner takes in when Obsidian comes to the front.
 
 ## Install
 
@@ -77,4 +66,4 @@ Not on the community plugin store; install it with [BRAT](https://github.com/TfT
 
 Or copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/task-cleaner/` in your vault.
 
-Task Cleaner used to be called Checker. Notes from then keep working: the old `%% Checker: hidden items` blocks and `checker-ignore` properties are still read, and are switched to the new names the first time Task Cleaner runs.
+Earlier versions (some called Checker) kept hidden tasks in a block at the bottom of each note. Task Cleaner moves any such block into its settings and out of the note when it starts. The old `checker-ignore` property still works.
