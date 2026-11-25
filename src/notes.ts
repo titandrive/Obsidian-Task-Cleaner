@@ -93,10 +93,20 @@ export function serialize(note: Note): string {
   return [...body, ...(body.length ? [""] : []), BLOCK_START, ...block, BLOCK_END].join("\n") + "\n";
 }
 
+/** A task taken out of a note: its lines, and where it was. */
+export interface Taken { lines: string[]; after: string | null; at: number }
+
 /** Takes the task at line [at] (and what's nested under it) out of the note's lines. */
-export function takeOutAt(note: Note, at: number, keep: boolean) {
+export function takeOutAt(note: Note, at: number, keep: boolean): Taken {
   const lines = note.body.splice(at, blockEnd(note.body, at) - at);
-  if (keep) note.entries.push({ kind: "hidden", after: at > 0 ? note.body[at - 1] : null, at, lines, hiddenAt: Date.now() });
+  const taken = { lines, after: at > 0 ? note.body[at - 1] : null, at };
+  if (keep) note.entries.push({ kind: "hidden", ...taken, hiddenAt: Date.now() });
+  return taken;
+}
+
+/** Puts taken-out tasks back into the note's lines where they were, latest first. */
+export function putBack(body: string[], taken: Taken[]) {
+  for (let k = taken.length - 1; k >= 0; k--) body.splice(placeFor(body, taken[k]), 0, ...taken[k].lines);
 }
 
 /**

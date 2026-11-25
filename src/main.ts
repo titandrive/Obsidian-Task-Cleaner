@@ -1,6 +1,6 @@
 import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, normalizePath, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
-import { CHECKED, Entry, HiddenState, IGNORE_KEY, Note, mergeHidden, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { CHECKED, Entry, HiddenState, IGNORE_KEY, Note, Taken, mergeHidden, putBack, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
@@ -24,6 +24,9 @@ const DEFAULT_SETTINGS: TaskCleanerSettings = {
   hidden: {},
   updated: {},
 };
+
+/** How long the notice with Undo stays after a task is deleted. */
+const UNDO_MS = 5000;
 
 /** The choices for how long hidden items are kept. */
 const PURGES: [number, string][] = [
@@ -70,6 +73,12 @@ export default class TaskCleanerPlugin extends Plugin {
   private ribbonEl!: HTMLElement;
   private command!: Command;
   private ignoreCommand!: Command;
+  /** Tasks just deleted (Delete mode), with the notice offering to put them back. */
+  private deleted: { file: TFile; taken: Taken[]; notice: Notice; until: number } | null = null;
+  /** Hidden items brought back by Ctrl/Cmd+Z, so a redo can hide them again. */
+  private undone: { path: string; entry: Entry }[] = [];
+  /** Tasks recently taken out (either mode), so one brought back by Ctrl/Cmd+Z comes back unchecked. */
+  private recent: { path: string; line: string }[] = [];
 
   async onload() {
     const data = (await this.loadData()) ?? {};
@@ -84,10 +93,15 @@ export default class TaskCleanerPlugin extends Plugin {
 
     // Both say what they'll do in the current note: show its hidden tasks, or hide them again.
     this.ribbonEl = this.addRibbonIcon("circle-dashed", "Show completed tasks", () => this.toggleShowHidden());
+    // Only in Hide mode: in Delete mode there's nothing kept to show.
     this.command = this.addCommand({
       id: "toggle-hidden-items",
       name: "Show completed tasks",
-      callback: () => this.toggleShowHidden(),
+      checkCallback: (checking) => {
+        if (this.settings.action !== "hide") return false;
+        if (!checking) this.toggleShowHidden();
+        return true;
+      },
     });
     this.addCommand({
       id: "delete-completed-tasks",
@@ -164,11 +178,23 @@ export default class TaskCleanerPlugin extends Plugin {
       this.updateLabels();
     });
     addCheckMark(this.ribbonEl);
+    this.showModeControls();
+  }
+
+  /** The sidebar button only shows in Hide mode. */
+  showModeControls() {
+    this.ribbonEl.toggle(this.settings.action === "hide");
   }
 
   private onEditorUpdate(update: ViewUpdate) {
     const file = update.state.field(editorInfoField, false)?.file;
     if (!file) return;
+    const undo = update.transactions.some((t) => t.isUserEvent("undo"));
+    if (undo || update.transactions.some((t) => t.isUserEvent("redo"))) {
+      // Stepping through the history isn't checking anything off.
+      this.followHistory(file, update, undo);
+      return;
+    }
 
     const newDoc = update.state.doc;
     const oldDoc = update.startState.doc;
@@ -184,6 +210,76 @@ export default class TaskCleanerPlugin extends Plugin {
       }
     });
     this.schedule(file, checked, newDoc.toString());
+  }
+
+  /**
+   * Ctrl/Cmd+Z brought back tasks Task Cleaner had taken out: hidden ones come off the hidden list
+   * (they're in the note again), and a Delete mode Undo notice for the note goes, so neither can put
+   * them back a second time. A redo that takes them out again puts them back on the list.
+   */
+  private followHistory(file: TFile, update: ViewUpdate, undo: boolean) {
+    const added = new Set<string>();
+    const removed = new Set<string>();
+    update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      for (const l of inserted.toString().split("\n")) added.add(l);
+      for (const l of update.startState.doc.sliceString(fromA, toA).split("\n")) removed.add(l);
+    });
+    const now = new Set(update.state.doc.toString().split("\n"));
+    let changed = false;
+    if (undo) this.uncheckBroughtBack(file, update);
+    if (undo) {
+      if (this.deleted?.file === file) {
+        this.deleted.notice.hide();
+        this.deleted = null;
+      }
+      const list = this.settings.hidden[file.path] ?? [];
+      for (let k = list.length - 1; k >= 0; k--) {
+        const e = list[k];
+        if (e.kind !== "hidden" || !added.has(e.lines[0])) continue;
+        added.delete(e.lines[0]);
+        list.splice(k, 1);
+        this.undone.push({ path: file.path, entry: e });
+        changed = true;
+      }
+      if (!list.length) delete this.settings.hidden[file.path];
+    } else {
+      for (let k = this.undone.length - 1; k >= 0; k--) {
+        const { path, entry } = this.undone[k];
+        const open = entry.kind === "hidden" ? entry.lines[0].replace(CHECKED, "$1 $2") : "";
+        if (path !== file.path || entry.kind !== "hidden" || !(removed.has(entry.lines[0]) || removed.has(open)) || now.has(entry.lines[0])) continue;
+        (this.settings.hidden[path] ??= []).push(entry);
+        this.undone.splice(k, 1);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    this.touch(file.path);
+    void this.saveSettings();
+    this.updateLabels();
+  }
+
+  /**
+   * Tasks Ctrl/Cmd+Z brought back come back unchecked. The uncheck is a step of its own in the history:
+   * kept out of it, the history's own uncheck of the original check would later be applied on top.
+   */
+  private uncheckBroughtBack(file: TFile, update: ViewUpdate) {
+    const doc = update.state.doc;
+    const marks: number[] = [];
+    update.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+      for (let n = doc.lineAt(fromB).number; n <= doc.lineAt(toB).number; n++) {
+        const line = doc.line(n);
+        const k = this.recent.findIndex((r) => r.path === file.path && r.line === line.text);
+        if (k === -1 || !isChecked(line.text)) continue;
+        this.recent.splice(k, 1);
+        marks.push(line.from + line.text.match(CHECKED)![1].length);
+      }
+    });
+    if (!marks.length) return;
+    const view = update.view;
+    window.setTimeout(() => {
+      const ok = marks.filter((at) => /[xX]/.test(view.state.doc.sliceString(at, at + 1)));
+      if (ok.length) view.dispatch({ changes: ok.map((at) => ({ from: at, to: at + 1, insert: " " })) });
+    }, 0);
   }
 
   /** Remembers the unchecked tasks of every note that has tasks, as a starting point. */
@@ -276,15 +372,56 @@ export default class TaskCleanerPlugin extends Plugin {
    * hiding. If it was unchecked again in the meantime, it stays.
    */
   private async takeOut(file: TFile, text: string, near: number) {
+    let deletedNow: Taken | null = null;
     await this.withNote(file, (note) => {
       // The same text may be on several lines; take the one closest to where it was checked.
       let at = -1;
       note.body.forEach((l, i) => { if (l === text && (at === -1 || Math.abs(i - near) < Math.abs(at - near))) at = i; });
       if (at === -1) return false;
-      takeOutAt(note, at, this.settings.action === "hide");
+      const taken = takeOutAt(note, at, this.settings.action === "hide");
+      this.recent.push({ path: file.path, line: taken.lines[0] });
+      if (this.recent.length > 50) this.recent.shift();
+      if (this.settings.action === "delete") deletedNow = taken;
       return true;
     });
+    if (deletedNow) this.offerUndo(file, deletedNow);
     this.updateLabels();
+  }
+
+  /**
+   * After a delete (Delete mode): a notice for a few seconds with Undo, which puts the task back where
+   * it was. Tasks deleted in the same note while it's up share it.
+   */
+  private offerUndo(file: TFile, taken: Taken) {
+    const now = Date.now();
+    const batch = this.deleted && this.deleted.file === file && now < this.deleted.until ? this.deleted : null;
+    const items = batch ? [...batch.taken, taken] : [taken];
+    const message = createFragment((f) => {
+      f.appendText(items.length === 1 ? "Deleted task. " : `Deleted ${items.length} tasks. `);
+      const undo = f.createEl("a", { text: "Undo", href: "#" });
+      undo.onclick = (e) => {
+        e.preventDefault();
+        current.notice.hide();
+        if (this.deleted === current) this.deleted = null;
+        void this.undoDelete(file, items);
+      };
+    });
+    if (batch) {
+      batch.notice.setMessage(message);
+      batch.taken = items;
+    }
+    const current = batch ?? { file, taken: items, notice: new Notice(message, UNDO_MS), until: 0 };
+    current.until = now + UNDO_MS;
+    this.deleted = current;
+  }
+
+  /** Puts deleted tasks back in the note where they were. */
+  private async undoDelete(file: TFile, taken: Taken[]) {
+    await this.apply(file, (content) => {
+      const body = content.split("\n");
+      putBack(body, taken.map((t) => ({ ...t, lines: [t.lines[0].replace(CHECKED, "$1 $2"), ...t.lines.slice(1)] })));
+      return body.join("\n");
+    });
   }
 
   private async toggleShowHidden() {
@@ -439,6 +576,7 @@ export default class TaskCleanerPlugin extends Plugin {
       ...merged,
     };
     if (changedHere) await this.saveSettings();
+    this.showModeControls();
     this.updateLabels();
   }
 
@@ -493,6 +631,8 @@ class TaskCleanerSettingTab extends PluginSettingTab {
           .onChange(async (value: string) => {
             this.plugin.settings.action = value as CheckedAction;
             await this.plugin.saveSettings();
+            this.plugin.showModeControls();
+            this.display();
           })
       );
 
@@ -509,7 +649,7 @@ class TaskCleanerSettingTab extends PluginSettingTab {
         });
       });
 
-    new Setting(containerEl)
+    if (this.plugin.settings.action === "hide") new Setting(containerEl)
       .setName("Purge hidden items")
       .setDesc("How long hidden items are kept before they're deleted for good. Items shown in a note at the time stay.")
       .addDropdown((dropdown) => {
