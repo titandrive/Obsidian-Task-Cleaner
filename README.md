@@ -65,7 +65,7 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 
 ## QuickNote
 
-The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) into the same block, after the same delay. It doesn't know about `task-cleaner-ignore` yet.
+The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) into the same block, after the same delay, and ignored notes are left alone.
 
 ## Install
 
