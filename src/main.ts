@@ -8,6 +8,8 @@ interface TaskCleanerSettings {
   action: CheckedAction;
   skipResetNotes: boolean;
   delayMs: number;
+  /** How long the notice with Undo stays after a task is hidden or deleted; 0 for no notice. */
+  undoMs: number;
   /** Hidden items older than this many days are dropped; 0 keeps them for good. */
   purgeDays: number;
   /** Each note's hidden items, by the note's path. */
@@ -20,13 +22,12 @@ const DEFAULT_SETTINGS: TaskCleanerSettings = {
   action: "hide",
   skipResetNotes: true,
   delayMs: 500,
+  undoMs: 5000,
   purgeDays: 30,
   hidden: {},
   updated: {},
 };
 
-/** How long the notice with Undo stays after a task is hidden or deleted. */
-const UNDO_MS = 5000;
 
 /** The choices for how long hidden items are kept. */
 const PURGES: [number, string][] = [
@@ -40,6 +41,10 @@ const PURGES: [number, string][] = [
 const INBOX = "widget-inbox.json";
 
 /** The choices for how long a checked task stays before it's hidden or deleted. */
+const UNDO_TIMES: [number, string][] = [
+  [0, "Off"], [3000, "3 seconds"], [5000, "5 seconds"], [10000, "10 seconds"], [15000, "15 seconds"], [30000, "30 seconds"],
+];
+
 const DELAYS: [number, string][] = [
   [0, "Right away"], [500, "Half a second"], [1000, "1 second"], [2000, "2 seconds"],
   [3000, "3 seconds"], [5000, "5 seconds"], [10000, "10 seconds"], [30000, "30 seconds"],
@@ -86,6 +91,7 @@ export default class TaskCleanerPlugin extends Plugin {
       action: data.action ?? DEFAULT_SETTINGS.action,
       skipResetNotes: data.skipResetNotes ?? DEFAULT_SETTINGS.skipResetNotes,
       delayMs: typeof data.delayMs === "number" ? data.delayMs : DEFAULT_SETTINGS.delayMs,
+      undoMs: typeof data.undoMs === "number" ? data.undoMs : DEFAULT_SETTINGS.undoMs,
       purgeDays: typeof data.purgeDays === "number" ? data.purgeDays : DEFAULT_SETTINGS.purgeDays,
       ...readHidden(data),
     };
@@ -384,7 +390,7 @@ export default class TaskCleanerPlugin extends Plugin {
       takenNow = taken;
       return true;
     });
-    if (takenNow) this.offerUndo(file, takenNow);
+    if (takenNow && this.settings.undoMs > 0) this.offerUndo(file, takenNow);
     this.updateLabels();
   }
 
@@ -413,8 +419,8 @@ export default class TaskCleanerPlugin extends Plugin {
       batch.notice.setMessage(message);
       batch.taken = items;
     }
-    const current = batch ?? { file, taken: items, notice: new Notice(message, UNDO_MS), until: 0 };
-    current.until = now + UNDO_MS;
+    const current = batch ?? { file, taken: items, notice: new Notice(message, this.settings.undoMs), until: 0 };
+    current.until = now + this.settings.undoMs;
     this.deleted = current;
   }
 
@@ -590,6 +596,7 @@ export default class TaskCleanerPlugin extends Plugin {
       action: data.action ?? this.settings.action,
       skipResetNotes: data.skipResetNotes ?? this.settings.skipResetNotes,
       delayMs: typeof data.delayMs === "number" ? data.delayMs : this.settings.delayMs,
+      undoMs: typeof data.undoMs === "number" ? data.undoMs : this.settings.undoMs,
       purgeDays: typeof data.purgeDays === "number" ? data.purgeDays : this.settings.purgeDays,
       ...merged,
     };
@@ -663,6 +670,19 @@ class TaskCleanerSettingTab extends PluginSettingTab {
         if (!DELAYS.some(([ms]) => ms === current)) dropdown.addOption(String(current), `${current / 1000} seconds`);
         dropdown.setValue(String(current)).onChange(async (value) => {
           this.plugin.settings.delayMs = Number(value);
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Undo")
+      .setDesc("How long the notice offering Undo stays after a task is hidden or deleted. Ctrl/Cmd+Z works either way.")
+      .addDropdown((dropdown) => {
+        for (const [ms, label] of UNDO_TIMES) dropdown.addOption(String(ms), label);
+        const current = this.plugin.settings.undoMs;
+        if (!UNDO_TIMES.some(([ms]) => ms === current)) dropdown.addOption(String(current), `${current / 1000} seconds`);
+        dropdown.setValue(String(current)).onChange(async (value) => {
+          this.plugin.settings.undoMs = Number(value);
           await this.plugin.saveSettings();
         });
       });

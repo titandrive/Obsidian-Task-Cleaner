@@ -9,7 +9,7 @@ Check a task, in any list style (`- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`). Half a se
 - **Hide** (the default): it's kept by Task Cleaner, ready to be shown again.
 - **Delete**: it's removed for good. In Delete mode the sidebar button and the show/hide command are gone, since nothing is kept.
 
-Either way, a notice offers **Undo** for a few seconds (tasks taken out one after another share it), which puts them back where they were, unchecked.
+Either way, a notice offers **Undo** for a few seconds (tasks taken out one after another share it), which puts them back where they were, unchecked. How long it stays is a setting.
 
 Changed your mind? Uncheck it during the delay and it stays. Afterwards, in the editor, Ctrl/Cmd+Z puts it back unchecked, in either mode.
 
@@ -53,6 +53,7 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 
 - **Checked item behavior:** Hide (the default) or Delete.
 - **Delay:** how long a checked task stays before it's hidden or deleted. Right away, half a second (the default), 1, 2, 3, 5, 10 or 30 seconds.
+- **Undo:** how long the notice offering Undo stays: off, 3, 5 (the default), 10, 15 or 30 seconds. The QuickNote widget's Undo button follows it.
 - **Purge hidden items** (Hide mode): how long hidden tasks are kept. 1 day, 1 week, 2 weeks, 30 days (the default), 90 days, 1 year, or never.
 - **Leave Task Resetter notes alone:** on by default. Only shown, and only used, when Task Resetter is installed.
 
