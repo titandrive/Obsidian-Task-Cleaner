@@ -25,7 +25,7 @@ const DEFAULT_SETTINGS: TaskCleanerSettings = {
   updated: {},
 };
 
-/** How long the notice with Undo stays after a task is deleted. */
+/** How long the notice with Undo stays after a task is hidden or deleted. */
 const UNDO_MS = 5000;
 
 /** The choices for how long hidden items are kept. */
@@ -73,7 +73,7 @@ export default class TaskCleanerPlugin extends Plugin {
   private ribbonEl!: HTMLElement;
   private command!: Command;
   private ignoreCommand!: Command;
-  /** Tasks just deleted (Delete mode), with the notice offering to put them back. */
+  /** Tasks just hidden or deleted, with the notice offering to put them back. */
   private deleted: { file: TFile; taken: Taken[]; notice: Notice; until: number } | null = null;
   /** Hidden items brought back by Ctrl/Cmd+Z, so a redo can hide them again. */
   private undone: { path: string; entry: Entry }[] = [];
@@ -372,7 +372,7 @@ export default class TaskCleanerPlugin extends Plugin {
    * hiding. If it was unchecked again in the meantime, it stays.
    */
   private async takeOut(file: TFile, text: string, near: number) {
-    let deletedNow: Taken | null = null;
+    let takenNow: Taken | null = null;
     await this.withNote(file, (note) => {
       // The same text may be on several lines; take the one closest to where it was checked.
       let at = -1;
@@ -381,29 +381,32 @@ export default class TaskCleanerPlugin extends Plugin {
       const taken = takeOutAt(note, at, this.settings.action === "hide");
       this.recent.push({ path: file.path, line: taken.lines[0] });
       if (this.recent.length > 50) this.recent.shift();
-      if (this.settings.action === "delete") deletedNow = taken;
+      takenNow = taken;
       return true;
     });
-    if (deletedNow) this.offerUndo(file, deletedNow);
+    if (takenNow) this.offerUndo(file, takenNow);
     this.updateLabels();
   }
 
   /**
-   * After a delete (Delete mode): a notice for a few seconds with Undo, which puts the task back where
-   * it was. Tasks deleted in the same note while it's up share it.
+   * After a task is hidden or deleted: a notice for a few seconds with Undo, which puts the task back
+   * where it was, unchecked (and off the hidden list). Tasks taken out of the same note while it's up
+   * share it.
    */
   private offerUndo(file: TFile, taken: Taken) {
     const now = Date.now();
+    const hide = this.settings.action === "hide";
     const batch = this.deleted && this.deleted.file === file && now < this.deleted.until ? this.deleted : null;
     const items = batch ? [...batch.taken, taken] : [taken];
     const message = createFragment((f) => {
-      f.appendText(items.length === 1 ? "Deleted task. " : `Deleted ${items.length} tasks. `);
+      const n = items.length;
+      f.appendText(hide ? (n === 1 ? "Task hidden. " : `${n} tasks hidden. `) : (n === 1 ? "Deleted task. " : `Deleted ${n} tasks. `));
       const undo = f.createEl("a", { text: "Undo", href: "#" });
       undo.onclick = (e) => {
         e.preventDefault();
         current.notice.hide();
         if (this.deleted === current) this.deleted = null;
-        void this.undoDelete(file, items);
+        void this.undoTakeOut(file, items);
       };
     });
     if (batch) {
@@ -415,13 +418,17 @@ export default class TaskCleanerPlugin extends Plugin {
     this.deleted = current;
   }
 
-  /** Puts deleted tasks back in the note where they were. */
-  private async undoDelete(file: TFile, taken: Taken[]) {
-    await this.apply(file, (content) => {
-      const body = content.split("\n");
-      putBack(body, taken.map((t) => ({ ...t, lines: [t.lines[0].replace(CHECKED, "$1 $2"), ...t.lines.slice(1)] })));
-      return body.join("\n");
+  /** Puts tasks just hidden or deleted back in the note where they were, unchecked, and off the hidden list. */
+  private async undoTakeOut(file: TFile, taken: Taken[]) {
+    await this.withNote(file, (note) => {
+      putBack(note.body, taken.map((t) => ({ ...t, lines: [t.lines[0].replace(CHECKED, "$1 $2"), ...t.lines.slice(1)] })));
+      for (const t of taken) {
+        const k = note.entries.findIndex((e) => e.kind === "hidden" && e.at === t.at && e.after === t.after && e.lines.join("\n") === t.lines.join("\n"));
+        if (k !== -1) note.entries.splice(k, 1);
+      }
+      return true;
     });
+    this.updateLabels();
   }
 
   private async toggleShowHidden() {
@@ -514,14 +521,25 @@ export default class TaskCleanerPlugin extends Plugin {
     const path = normalizePath(`${this.manifest.dir}/${INBOX}`);
     const adapter = this.app.vault.adapter;
     if (!(await adapter.exists(path))) return;
-    let items: (Entry & { path: string })[] = [];
+    let items: unknown = [];
     try { items = JSON.parse(await adapter.read(path)); } catch { return; }
     await adapter.remove(path);
     if (!Array.isArray(items) || !items.length) return;
-    for (const { path: note, ...item } of items) {
-      if (typeof note !== "string" || item.kind !== "hidden" || !Array.isArray(item.lines)) continue;
-      (this.settings.hidden[note] ??= []).push(stamp(item as Entry));
-      this.touch(note);
+    for (const { path: note, ...item } of items as (Record<string, unknown> & { path: string })[]) {
+      if (typeof note !== "string" || !Array.isArray(item.lines)) continue;
+      if (item.kind === "hidden") {
+        (this.settings.hidden[note] ??= []).push(stamp(item as unknown as Entry));
+        this.touch(note);
+      } else if (item.kind === "unhide") {
+        // Undone on the widget after it was taken in: it's back in the note, so it comes off the list.
+        const list = this.settings.hidden[note] ?? [];
+        const lines = (item.lines as string[]).join("\n");
+        const k = list.findIndex((e) => e.kind === "hidden" && e.at === item.at && e.after === item.after && e.lines.join("\n") === lines);
+        if (k === -1) continue;
+        list.splice(k, 1);
+        if (!list.length) delete this.settings.hidden[note];
+        this.touch(note);
+      }
     }
     await this.saveSettings();
     this.updateLabels();

@@ -7,7 +7,9 @@ Check off a task and it gets out of the way: Task Cleaner hides it (or deletes i
 Check a task, in any list style (`- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`). Half a second later (the delay is a setting) the task, with anything nested under it, is taken out of the note:
 
 - **Hide** (the default): it's kept by Task Cleaner, ready to be shown again.
-- **Delete**: it's removed for good. A notice offers **Undo** for a few seconds (tasks deleted one after another share it), which puts them back where they were, unchecked. In Delete mode the sidebar button and the show/hide command are gone, since nothing is kept.
+- **Delete**: it's removed for good. In Delete mode the sidebar button and the show/hide command are gone, since nothing is kept.
+
+Either way, a notice offers **Undo** for a few seconds (tasks taken out one after another share it), which puts them back where they were, unchecked.
 
 Changed your mind? Uncheck it during the delay and it stays. Afterwards, in the editor, Ctrl/Cmd+Z puts it back unchecked, in either mode.
 
@@ -56,7 +58,7 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 
 ## QuickNote
 
-The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) after the same delay, and ignored notes are left alone. The widget leaves hidden tasks in `widget-inbox.json` next to the settings, which Task Cleaner takes in when Obsidian comes to the front.
+The [QuickNote](https://github.com/titandrive/obsidian-quicknote) Android widget follows Task Cleaner's settings: a task ticked on the widget is hidden (or deleted) after the same delay, and ignored notes are left alone. For a few seconds afterwards the widget shows an Undo button, which puts it back unchecked. The widget leaves hidden tasks in `widget-inbox.json` next to the settings, which Task Cleaner takes in when Obsidian comes to the front.
 
 ## Install
 
