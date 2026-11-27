@@ -1,6 +1,6 @@
 import { App, Command, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, editorInfoField, normalizePath, setIcon } from "obsidian";
 import { EditorView, ViewUpdate } from "@codemirror/view";
-import { CHECKED, Entry, HiddenState, IGNORE_KEY, Note, Taken, mergeHidden, putBack, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
+import { CHECKED, Entry, HiddenState, IGNORE_KEY, Note, Taken, mergeHidden, putBack, OLD_IGNORE_KEY, isBlockStart, isIgnored, deleteCompleted, resetCovered, hideShown, isChecked, newlyChecked, parse, purge, replaceLines, serialize, showAll, takeOutAt, uncheckedCounts } from "./notes";
 
 type CheckedAction = "hide" | "delete";
 
@@ -309,9 +309,13 @@ export default class TaskCleanerPlugin extends Plugin {
   }
 
   private schedule(file: TFile, checked: { text: string; line: number }[], text: string) {
-    if (!checked.length) return;
-    if (this.settings.skipResetNotes && this.hasTaskResetter() && TASK_RESETTER_MARKER.test(text)) return;
     if (isIgnored(text)) return;
+    // Tasks a Task Resetter button resets stay, so its checklist keeps working; the rest go as usual.
+    if (this.settings.skipResetNotes && this.hasTaskResetter() && TASK_RESETTER_MARKER.test(text)) {
+      const covered = resetCovered(text);
+      checked = checked.filter((c) => !covered.has(c.line));
+    }
+    if (!checked.length) return;
 
     for (const { text, line } of checked) {
       const key = `${file.path}\n${line}\n${text}`;
@@ -700,8 +704,8 @@ class TaskCleanerSettingTab extends PluginSettingTab {
       });
 
     if (this.plugin.hasTaskResetter()) new Setting(containerEl)
-      .setName("Leave Task Resetter notes alone")
-      .setDesc("Don't hide or delete checked items in notes that have a Task Resetter button ([reset-tasks]).")
+      .setName("Leave Task Resetter checklists alone")
+      .setDesc("Don't hide or delete checked items a Task Resetter button resets: its heading's section, or the whole note for a button above every heading or [reset-tasks all].")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.skipResetNotes).onChange(async (value) => {
           this.plugin.settings.skipResetNotes = value;

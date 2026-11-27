@@ -47,7 +47,7 @@ task-cleaner-ignore: true
 
 Or run **Ignore this note** from the command palette. In an ignored note the same command reads **Track this note**, and removes it again.
 
-Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resetter) button (`[reset-tasks]`) are left alone too, so their checklists keep working (**Leave Task Resetter notes alone** in settings, on by default).
+Tasks a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resetter) button resets are left alone too, so its checklists keep working, by Task Resetter's own rules: a button on or under a heading covers that heading's section (subheadings included), one above every heading or `[reset-tasks all]` the whole note, `[reset-tasks ##]` every section of that level, and `[reset-tasks: Name]` each heading named Name. Checked tasks elsewhere in the note are hidden or deleted as usual (**Leave Task Resetter checklists alone** in settings, on by default).
 
 ## Settings
 
@@ -55,7 +55,7 @@ Notes with a [Task Resetter](https://github.com/titandrive/Obsidian-Task-Resette
 - **Delay:** how long a checked task stays before it's hidden or deleted. Right away, half a second (the default), 1, 2, 3, 5, 10 or 30 seconds.
 - **Undo:** how long the notice offering Undo stays: off, 3, 5 (the default), 10, 15 or 30 seconds. The QuickNote widget's Undo button follows it.
 - **Purge hidden items** (Hide mode): how long hidden tasks are kept. 1 day, 1 week, 2 weeks, 30 days (the default), 90 days, 1 year, or never.
-- **Leave Task Resetter notes alone:** on by default. Only shown, and only used, when Task Resetter is installed.
+- **Leave Task Resetter checklists alone:** on by default. Only shown, and only used, when Task Resetter is installed.
 
 ## QuickNote
 

@@ -262,3 +262,76 @@ export function mergeHidden(local: HiddenState, remote: HiddenState): HiddenStat
   }
   return out;
 }
+
+/** Task Resetter's button: [reset-tasks], [reset-tasks all], [reset-tasks ##], [reset-tasks: Name], with options. */
+const RESET_MARK = /\[reset-tasks(?=[\s:\]])([^\]\n]*)\]/gi;
+const FENCE = /^\s*(```|~~~)/;
+const HEADING = /^(#{1,6})\s/;
+
+/** A button's marker read as Task Resetter reads it, or null if it isn't one. */
+function resetMarker(inner: string): { all: boolean; level: number; name: string | null } | null {
+  const opts = [...inner.matchAll(/\s+(icon|label|heading):\s*/gi)];
+  const head = inner.slice(0, opts[0]?.index ?? inner.length);
+  let name: string | null = null;
+  opts.forEach((o, i) => {
+    const value = inner.slice((o.index ?? 0) + o[0].length, opts[i + 1]?.index ?? inner.length).trim();
+    if (value && o[1].toLowerCase() === "heading") name = value;
+  });
+  const level = /^ (#{1,6})$/.exec(head)?.[1].length ?? 0;
+  const short = /^:\s*(.*\S)\s*$/.exec(head)?.[1] ?? null;
+  const all = head.toLowerCase() === " all";
+  if (head && !all && !level && short === null) return null;
+  return { all, level, name: name ?? short };
+}
+
+/** A heading's text as [reset-tasks: Name] matches it. */
+function headingText(line: string) {
+  return line.replace(/^#{1,6}\s+/, "").replace(RESET_MARK, "").replace(/\s+#+\s*$/, "").trim().toLowerCase();
+}
+
+/**
+ * The lines (0-based) a Task Resetter button in the note resets, as Task Resetter decides: a button
+ * on or under a heading, that heading's section (to the next heading of the same or a higher level,
+ * subheadings included), or the whole note when no heading is above it; [reset-tasks all] the whole
+ * note; [reset-tasks ##] every section of that level; [reset-tasks: Name] each heading named Name.
+ */
+export function resetCovered(text: string): Set<number> {
+  const lines = text.split("\n");
+  const fenced: boolean[] = [];
+  let inFence = false;
+  lines.forEach((l, k) => {
+    const marker = FENCE.test(l);
+    if (marker) inFence = !inFence;
+    fenced[k] = inFence || marker;
+  });
+  const level = (k: number) => (fenced[k] ? 0 : HEADING.exec(lines[k])?.[1].length ?? 0);
+  const covered = new Set<number>();
+  const section = (h: number) => {
+    let end = h + 1;
+    while (end < lines.length && !(level(end) >= 1 && level(end) <= level(h))) end++;
+    for (let k = h + 1; k < end; k++) covered.add(k);
+  };
+  lines.forEach((line, at) => {
+    if (fenced[at]) return;
+    let mark: ReturnType<typeof resetMarker> = null;
+    for (const m of line.matchAll(RESET_MARK)) {
+      // Not in `inline code`.
+      if ((line.slice(0, m.index).match(/`/g)?.length ?? 0) % 2 === 1) continue;
+      mark = resetMarker(m[1]);
+      if (mark) break;
+    }
+    if (!mark) return;
+    if (mark.all) lines.forEach((_, k) => covered.add(k));
+    else if (mark.level) lines.forEach((_, k) => { if (level(k) === mark!.level) section(k); });
+    else if (mark.name) {
+      const name = mark.name.toLowerCase();
+      lines.forEach((l, k) => { if (level(k) > 0 && headingText(l) === name) section(k); });
+    } else {
+      let own = -1;
+      for (let k = at; k >= 0 && own < 0; k--) if (level(k) > 0) own = k;
+      if (own >= 0) section(own);
+      else lines.forEach((_, k) => covered.add(k));
+    }
+  });
+  return covered;
+}
